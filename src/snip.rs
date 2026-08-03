@@ -133,14 +133,6 @@ impl OverlayState {
     pub fn monitor(&self) -> MonitorInfo {
         self.monitor
     }
-
-    /// The frozen desktop snapshot and the virtual-desktop origin that maps it
-    /// back to global physical pixels, if any.
-    pub fn background_image(&self) -> Option<(&RgbaImage, i32, i32)> {
-        self.background
-            .as_ref()
-            .map(|bg| (&bg.image, bg.origin_x, bg.origin_y))
-    }
 }
 
 fn fresh_viewport_id() -> ViewportId {

@@ -45,6 +45,8 @@ enum SnipState {
     /// Capturing the desktop snapshot before the overlay opens.
     Preparing(mpsc::Receiver<Result<Arc<Mutex<snip::OverlayState>>, String>>),
     Overlay(Arc<Mutex<snip::OverlayState>>),
+    /// Capturing the selected region off the UI thread.
+    Capturing(mpsc::Receiver<Result<RgbaImage, String>>),
 }
 
 struct OcrDialog {
@@ -220,25 +222,7 @@ impl LatexOcrApp {
 
                 match outcome {
                     Some(snip::OverlayOutcome::Captured(region)) => {
-                        // The selected region is cropped from the frozen
-                        // desktop snapshot captured when the snip started, so
-                        // the overlay never appears in the result.
-                        let image = {
-                            let guard = overlay.lock().unwrap();
-                            match guard.background_image() {
-                                Some((image, origin_x, origin_y)) => {
-                                    crop_region(image, region, origin_x, origin_y)
-                                }
-                                None => snapshot::capture_region(region),
-                            }
-                        };
-                        self.snip = SnipState::Idle;
-                        match image {
-                            Ok(image) => self.open_ocr_dialog(ctx, image),
-                            Err(message) => {
-                                self.set_status(format!("Screen capture failed: {message}"));
-                            }
-                        }
+                        self.start_capture(region);
                     }
                     Some(snip::OverlayOutcome::Cancelled) => {
                         self.snip = SnipState::Idle;
@@ -248,6 +232,30 @@ impl LatexOcrApp {
                         // The overlay only lives while we keep showing it, so
                         // keep waking the root until the selection finishes.
                         ctx.request_repaint_after(Duration::from_millis(16));
+                    }
+                }
+            }
+            SnipState::Capturing(rx) => {
+                // Poll for a finished background capture, treating a dead
+                // capture thread (it panicked without sending) as a failure so
+                // the app does not stay stuck in the "Capturing" state.
+                let ready = match rx.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        Some(Err("screen capture aborted".to_string()))
+                    }
+                };
+                if let Some(result) = ready {
+                    match result {
+                        Ok(image) => {
+                            self.snip = SnipState::Idle;
+                            self.open_ocr_dialog(ctx, image);
+                        }
+                        Err(message) => {
+                            self.snip = SnipState::Idle;
+                            self.set_status(format!("Screen capture failed: {message}"));
+                        }
                     }
                 }
             }
@@ -287,6 +295,20 @@ impl LatexOcrApp {
                 }
             }
         }
+    }
+
+    /// Captures the selected region off the UI thread and polls for the result.
+    fn start_capture(&mut self, region: snapshot::Region) {
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("snip-capture".into())
+            .spawn(move || {
+                let result = snapshot::capture_region(region);
+                let _ = tx.send(result);
+            })
+            .expect("spawn snip capture thread");
+        self.snip = SnipState::Capturing(rx);
+        self.set_status("Capturing screen…");
     }
 
     fn open_ocr_dialog(&mut self, ctx: &egui::Context, image: RgbaImage) {
@@ -946,27 +968,6 @@ impl LatexOcrApp {
             .unwrap_or(self.editor.text.len());
         self.editor.text[..byte].to_string()
     }
-}
-
-/// Crops `region` (global physical pixels) out of the desktop snapshot, which
-/// is offset from global coordinates by its origin.
-fn crop_region(
-    image: &RgbaImage,
-    region: snapshot::Region,
-    origin_x: i32,
-    origin_y: i32,
-) -> Result<RgbaImage, String> {
-    let x = (region.x - origin_x).max(0);
-    let y = (region.y - origin_y).max(0);
-    let width = (region.width as i32).min(image.width() as i32 - x);
-    let height = (region.height as i32).min(image.height() as i32 - y);
-    if width <= 0 || height <= 0 {
-        return Err("capture region is outside the desktop snapshot".to_string());
-    }
-    Ok(
-        image::imageops::crop_imm(image, x as u32, y as u32, width as u32, height as u32)
-            .to_image(),
-    )
 }
 
 /// Renders the OCR result ready for insertion: wrapped in inline or display
