@@ -197,7 +197,6 @@ impl Preview {
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            checkbox(ui, &mut self.enabled, "Auto");
             if ui.button("Render now").clicked() {
                 self.request_render();
             }
@@ -221,6 +220,7 @@ impl Preview {
                 self.zoom = (self.zoom * 1.25).min(4.0);
             }
             checkbox(ui, &mut self.fit_width, "Fit width");
+            checkbox(ui, &mut self.enabled, "Auto");
             if let Some((message, since)) = &self.save_message
                 && since.elapsed() < Duration::from_secs(5)
             {
