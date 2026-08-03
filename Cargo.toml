@@ -16,7 +16,7 @@ image = "=0.25.10"
 log = "=0.4.33"
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic", "ndarray", "api-27"] }
 pdfium-render = "=0.9.3"
-reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "default-tls", "json", "multipart"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "default-tls", "multipart"] }
 rfd = "=0.17.2"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
