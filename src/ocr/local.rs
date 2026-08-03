@@ -13,7 +13,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use image::RgbaImage;
 use image::imageops::FilterType;
@@ -33,6 +32,10 @@ const MAX_SEQ_LEN: usize = 512;
 const TEMPERATURE: f32 = 0.2;
 /// Keeps the top fraction of logits during sampling, as x-transformers' `top_k`.
 const TOP_K_THRESHOLD: f32 = 0.9;
+/// Sequences kept alive during beam search decoding.
+const BEAM_WIDTH: usize = 4;
+/// Tokens expanded per beam at each step, before pruning back to the width.
+const BEAM_CANDIDATES: usize = 8;
 
 fn ort_error(action: impl std::fmt::Display, source: impl std::fmt::Display) -> OcrError {
     OcrError {
@@ -59,35 +62,12 @@ fn init_runtime(lib_path: &Path) -> Result<(), OcrError> {
     })
 }
 
-/// Deterministic seedable PRNG for temperature sampling.
-struct Random(u64);
-
-impl Random {
-    fn new() -> Self {
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x9E37_79B9);
-        Random(seed | 1)
-    }
-
-    fn next_f64(&mut self) -> f64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x as f64 / u64::MAX as f64
-    }
-}
-
 /// Loaded ONNX sessions plus the tokenizer.
 struct ReadyBackend {
     encoder: Mutex<Session>,
     decoder: Mutex<Session>,
     resizer: Mutex<Option<Session>>,
     tokenizer: Tokenizer,
-    rng: Mutex<Random>,
 }
 
 impl ReadyBackend {
@@ -134,7 +114,6 @@ impl ReadyBackend {
             decoder: Mutex::new(decoder),
             resizer: Mutex::new(resizer),
             tokenizer: Tokenizer::bundled(),
-            rng: Mutex::new(Random::new()),
         })
     }
 
@@ -210,29 +189,87 @@ impl ReadyBackend {
             .map_err(|e| ort_error("read decoder output", e))
     }
 
-    /// Greedy, temperature-weighted autoregressive decoding.
-    fn sample(&self, context: &[f32], ctx_len: usize, dim: usize) -> Result<Vec<i64>, OcrError> {
+    /// Autoregressive decoding with beam search over the token distribution.
+    ///
+    /// Several candidate sequences are expanded in parallel and pruned by
+    /// cumulative log-probability, which is more robust than greedy sampling
+    /// and produces deterministic results. The decoder runs a full forward
+    /// pass per beam per step, matching how the model is exported.
+    fn beam_search(
+        &self,
+        context: &[f32],
+        ctx_len: usize,
+        dim: usize,
+    ) -> Result<Vec<i64>, OcrError> {
         if ctx_len == 0 {
             return Err(OcrError {
                 message: "encoder produced no context".to_string(),
             });
         }
-        let mut tokens = vec![BOS_TOKEN];
+        let mut beams: Vec<(Vec<i64>, f32)> = vec![(vec![BOS_TOKEN], 0.0)];
+        let mut completed: Vec<(Vec<i64>, f32)> = Vec::new();
+
         for _ in 0..MAX_SEQ_LEN {
-            let logits = self.run_decoder(&tokens, context, ctx_len, dim)?;
-            let vocab = logits.len() / tokens.len();
-            let last = &logits[(tokens.len() - 1) * vocab..tokens.len() * vocab];
+            if beams.is_empty() {
+                break;
+            }
+            let mut candidates: Vec<(Vec<i64>, f32)> = Vec::new();
+            for (tokens, score) in &beams {
+                let logits = self.run_decoder(tokens, context, ctx_len, dim)?;
+                let vocab = logits.len() / tokens.len();
+                let last = &logits[(tokens.len() - 1) * vocab..tokens.len() * vocab];
 
-            let filtered = top_k_filter(last, TOP_K_THRESHOLD);
-            let probs = softmax_scaled(&filtered, TEMPERATURE);
-            let mut rng = self.rng.lock().unwrap();
-            let next = sample_index(&probs, &mut rng) as i64;
+                let filtered = top_k_filter(last, TOP_K_THRESHOLD);
+                let probs = softmax_scaled(&filtered, TEMPERATURE);
+                let mut order: Vec<usize> = (0..probs.len()).collect();
+                order.sort_by(|&a, &b| {
+                    probs[b]
+                        .partial_cmp(&probs[a])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                for &token in order.iter().take(BEAM_CANDIDATES) {
+                    let prob = probs[token];
+                    if prob <= 0.0 {
+                        break; // probabilities are sorted descending
+                    }
+                    let mut next = tokens.clone();
+                    next.push(token as i64);
+                    candidates.push((next, score + prob.ln()));
+                }
+            }
 
-            tokens.push(next);
-            if next == EOS_TOKEN {
+            candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            beams.clear();
+            for (tokens, score) in candidates.into_iter().take(BEAM_WIDTH) {
+                if tokens.last() == Some(&EOS_TOKEN) {
+                    completed.push((tokens, score));
+                } else {
+                    beams.push((tokens, score));
+                }
+            }
+
+            // A finished beam can no longer improve its score, and extending a
+            // beam only lowers it (every added token has a negative log
+            // probability), so stop once the best finished beam beats the best
+            // open one. This keeps short formulas from stalling the loop.
+            let best_open = beams
+                .iter()
+                .map(|(_, score)| *score)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let best_done = completed
+                .iter()
+                .map(|(_, score)| *score)
+                .fold(f32::NEG_INFINITY, f32::max);
+            if best_done >= best_open {
                 break;
             }
         }
+
+        let best = completed
+            .iter()
+            .chain(beams.iter())
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let tokens = best.map(|b| b.0.clone()).unwrap_or_default();
         // Drop the start token, mirroring `out[:, t:]` in pix2tex's generate.
         Ok(tokens[1..].to_vec())
     }
@@ -275,7 +312,7 @@ impl ReadyBackend {
             });
         }
         let ctx_len = context.len() / dim;
-        self.sample(&context, ctx_len, dim)
+        self.beam_search(&context, ctx_len, dim)
     }
 }
 
@@ -359,18 +396,6 @@ fn softmax_scaled(logits: &[f32], temperature: f32) -> Vec<f32> {
     exps.into_iter().map(|e| e / sum).collect()
 }
 
-fn sample_index(probs: &[f32], rng: &mut Random) -> usize {
-    let draw = rng.next_f64();
-    let mut cumulative = 0.0f32;
-    for (i, &p) in probs.iter().enumerate() {
-        cumulative += p;
-        if f64::from(cumulative) >= draw {
-            return i;
-        }
-    }
-    probs.len() - 1
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,22 +415,6 @@ mod tests {
         let sum: f32 = probs.iter().sum();
         assert!((sum - 1.0).abs() < 1e-5);
         assert!(probs[2] > probs[1] && probs[1] > probs[0]);
-    }
-
-    #[test]
-    fn sampling_respects_probabilities() {
-        let probs = vec![1.0, 0.0, 0.0];
-        let mut rng = Random(0xDEAD_BEEF);
-        for _ in 0..10 {
-            assert_eq!(sample_index(&probs, &mut rng), 0);
-        }
-    }
-
-    #[test]
-    fn sample_index_returns_last_on_numerical_drift() {
-        let probs = vec![0.0, 0.0];
-        let mut rng = Random(0x1234_5678);
-        assert_eq!(sample_index(&probs, &mut rng), 1);
     }
 
     #[test]
