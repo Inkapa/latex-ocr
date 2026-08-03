@@ -15,7 +15,7 @@ use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 enum PreviewMsg {
     Rendered {
         generation_id: u64,
-        result: Result<Vec<RgbaImage>, String>,
+        result: Result<(Vec<RgbaImage>, Vec<u8>), String>,
     },
 }
 
@@ -25,10 +25,18 @@ struct RenderedPage {
     texture: TextureHandle,
 }
 
+/// A rendered document: GPU textures for display plus the source images and
+/// the compiled PDF, which the Save button writes to disk.
+struct RenderedDoc {
+    textures: Vec<RenderedPage>,
+    images: Vec<RgbaImage>,
+    pdf: Vec<u8>,
+}
+
 enum PreviewState {
     Empty,
     Rendering,
-    Rendered(Vec<RenderedPage>),
+    Rendered(RenderedDoc),
     Failed(String),
 }
 
@@ -45,6 +53,7 @@ pub struct Preview {
     tx: Sender<PreviewMsg>,
     rx: Receiver<PreviewMsg>,
     state: PreviewState,
+    save_message: Option<(String, Instant)>,
 }
 
 impl Preview {
@@ -63,6 +72,7 @@ impl Preview {
             tx,
             rx,
             state: PreviewState::Empty,
+            save_message: None,
         }
     }
 
@@ -115,24 +125,27 @@ impl Preview {
         if let Some(result) = result {
             self.in_flight = false;
             match result {
-                Ok(pages) => {
-                    self.state = PreviewState::Rendered(
-                        pages
-                            .into_iter()
-                            .filter_map(|img| {
-                                let (w, h) = (img.width() as usize, img.height() as usize);
-                                if w == 0 || h == 0 {
-                                    return None;
-                                }
-                                let image =
-                                    ColorImage::from_rgba_unmultiplied([w, h], &img.into_raw());
-                                let name = format!("preview-page-{}", w * h);
-                                Some(RenderedPage {
-                                    texture: ctx.load_texture(name, image, TextureOptions::LINEAR),
-                                })
+                Ok((images, pdf)) => {
+                    let textures = images
+                        .iter()
+                        .filter_map(|img| {
+                            let (w, h) = (img.width() as usize, img.height() as usize);
+                            if w == 0 || h == 0 {
+                                return None;
+                            }
+                            let image =
+                                ColorImage::from_rgba_unmultiplied([w, h], &img.clone().into_raw());
+                            let name = format!("preview-page-{}", w * h);
+                            Some(RenderedPage {
+                                texture: ctx.load_texture(name, image, TextureOptions::LINEAR),
                             })
-                            .collect(),
-                    );
+                        })
+                        .collect();
+                    self.state = PreviewState::Rendered(RenderedDoc {
+                        textures,
+                        images,
+                        pdf,
+                    });
                 }
                 Err(message) => {
                     self.state = PreviewState::Failed(message);
@@ -189,6 +202,13 @@ impl Preview {
             if ui.button("Render now").clicked() {
                 self.request_render();
             }
+            if ui
+                .button("Save…")
+                .on_hover_text("Save the rendered output as PNG, JPEG or PDF")
+                .clicked()
+            {
+                self.save_rendered();
+            }
             ui.separator();
             if ui.button("−").on_hover_text("Zoom out").clicked() {
                 self.zoom = (self.zoom / 1.25).max(0.1);
@@ -203,6 +223,13 @@ impl Preview {
             }
             ui.checkbox(&mut self.fit_width, "Fit width")
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if let Some((message, since)) = &self.save_message
+                && since.elapsed() < Duration::from_secs(5)
+            {
+                ui.label(egui::RichText::new(message.as_str()).weak());
+            } else {
+                self.save_message = None;
+            }
         });
 
         ui.separator();
@@ -258,9 +285,9 @@ impl Preview {
                             retry = true;
                         }
                     }
-                    PreviewState::Rendered(pages) => {
+                    PreviewState::Rendered(doc) => {
                         let avail_width = ui.available_width();
-                        for page in pages {
+                        for page in &doc.textures {
                             let native = page.texture.size_vec2();
                             let scale = if self.fit_width && native.x > 0.0 {
                                 (avail_width / native.x).min(self.zoom)
@@ -282,5 +309,62 @@ impl Preview {
                     self.request_render();
                 }
             });
+    }
+
+    /// Opens a save dialog and writes the rendered output in the format implied
+    /// by the chosen file extension. PNG and JPEG write the first page image;
+    /// PDF writes the compiled document.
+    fn save_rendered(&mut self) {
+        let Some(doc) = (match &self.state {
+            PreviewState::Rendered(doc) => Some(doc),
+            _ => None,
+        }) else {
+            self.save_message = Some(("Nothing to save yet.".to_string(), Instant::now()));
+            return;
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("PNG", &["png"])
+            .add_filter("JPEG", &["jpg", "jpeg"])
+            .add_filter("PDF", &["pdf"])
+            .set_file_name("render.png")
+            .save_file()
+        else {
+            return; // cancelled
+        };
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase)
+            .unwrap_or_default();
+        let result: Result<(), String> = match ext.as_str() {
+            "pdf" => std::fs::write(&path, &doc.pdf).map_err(|e| e.to_string()),
+            "jpg" | "jpeg" => doc
+                .images
+                .first()
+                .map(|img| {
+                    image::DynamicImage::ImageRgba8(img.clone())
+                        .to_rgb8()
+                        .save(&path)
+                        .map_err(|e| e.to_string())
+                })
+                .unwrap_or(Ok(())),
+            "png" => doc
+                .images
+                .first()
+                .map(|img| img.save(&path).map_err(|e| e.to_string()))
+                .unwrap_or(Ok(())),
+            _ => {
+                self.save_message = Some((
+                    "Choose a .png, .jpg or .pdf file name.".to_string(),
+                    Instant::now(),
+                ));
+                return;
+            }
+        };
+        let message = match result {
+            Ok(()) => format!("Saved to {}", path.display()),
+            Err(e) => format!("Save failed: {e}"),
+        };
+        self.save_message = Some((message, Instant::now()));
     }
 }

@@ -22,7 +22,7 @@ fn full_pipeline_renders_latex() {
     let override_path = std::env::var("TECTONIC_OVERRIDE").ok();
 
     let source = r"$\int_0^1 x^2\,dx = \frac{1}{3}$";
-    let pages = raster::render_source(&setup, source, override_path.as_deref())
+    let (pages, _) = raster::render_source(&setup, source, override_path.as_deref())
         .expect("render_source should succeed");
 
     assert!(!pages.is_empty(), "expected at least one rendered page");
@@ -41,7 +41,7 @@ fn renders_default_sample_document() {
     let override_path = std::env::var("TECTONIC_OVERRIDE").ok();
 
     let source = include_str!("../src/editor/sample.tex");
-    let pages = raster::render_source(&setup, source, override_path.as_deref())
+    let (pages, _) = raster::render_source(&setup, source, override_path.as_deref())
         .expect("sample document should compile");
 
     assert!(!pages.is_empty());
@@ -64,7 +64,7 @@ Inline $a^2 + b^2 = c^2$ and a display:
     E = mc^2
 \end{equation}
 \end{document}";
-    let pages = raster::render_source(&setup, source, override_path.as_deref())
+    let (pages, _) = raster::render_source(&setup, source, override_path.as_deref())
         .expect("full document should compile");
 
     assert!(!pages.is_empty());

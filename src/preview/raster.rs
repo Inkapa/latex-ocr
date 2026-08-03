@@ -176,12 +176,13 @@ fn resolve_rasterizer(engine_dir: &Path) -> Result<std::sync::Arc<dyn Rasterizer
 }
 
 /// Compiles `source` to a PDF and rasterizes every page. Runs entirely on the
-/// calling thread; used from background render workers.
+/// calling thread; used from background render workers. Returns the page
+/// images and the raw PDF so the rendered output can be saved to disk.
 pub fn render_source(
     setup: &RenderSetup,
     source: &str,
     tectonic_override: Option<&str>,
-) -> Result<Vec<RgbaImage>, String> {
+) -> Result<(Vec<RgbaImage>, Vec<u8>), String> {
     let bundle = setup.get(tectonic_override)?;
     let wrapped = crate::preview::tex::wrap_source(source);
     let tmp = tempfile::tempdir().map_err(|e| format!("cannot create temp dir: {e}"))?;
@@ -198,6 +199,7 @@ pub fn render_source(
         }
     })?;
     let pdf = &pdfs[0];
+    let pdf_bytes = fs::read(pdf).map_err(|e| format!("cannot read compiled PDF: {e}"))?;
     let pages: Vec<RgbaImage> = bundle
         .rasterizer
         .rasterize(pdf)
@@ -206,7 +208,7 @@ pub fn render_source(
         .map(trim_white)
         .collect();
     debug!("rendered {} page(s)", pages.len());
-    Ok(pages)
+    Ok((pages, pdf_bytes))
 }
 
 /// Threshold below which a pixel counts as "content" (not page white).
