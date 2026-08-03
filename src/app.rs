@@ -664,11 +664,15 @@ impl LatexOcrApp {
                         .prepare_started
                         .map(|t| t.elapsed())
                         .unwrap_or_default();
-                    let progress = (elapsed.as_secs_f32() / 0.7).clamp(0.0, 1.0);
+                    // Ease toward a ceiling so the bar never claims to finish
+                    // before the capture actually completes.
+                    let progress = (1.0 - (-elapsed.as_secs_f32() / 0.8).exp()) * 0.95;
                     ui.add(
                         egui::ProgressBar::new(progress)
                             .desired_width(140.0)
-                            .fill(theme::ACCENT),
+                            .desired_height(4.0)
+                            .fill(theme::ACCENT)
+                            .text(""),
                     );
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
