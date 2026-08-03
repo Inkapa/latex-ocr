@@ -890,6 +890,7 @@ impl LatexOcrApp {
         self.preview.set_tectonic_override(s.tectonic_path.clone());
         self.preview.reset_engine();
         self.prewarm_engine();
+        self.preview.request_render();
         self.set_status("Settings saved.");
     }
 

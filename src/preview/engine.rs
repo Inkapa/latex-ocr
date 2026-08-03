@@ -31,6 +31,10 @@ pub struct TectonicCli {
     pub binary: PathBuf,
 }
 
+/// Message of the error returned when a compile is cancelled. The preview
+/// treats it as a non-result rather than a failure.
+pub const CANCELLED: &str = "render cancelled";
+
 const MAX_LOG_LINES: usize = 40;
 
 impl TexEngine for TectonicCli {
@@ -152,7 +156,7 @@ fn cancelled(cancel: Option<&AtomicBool>) -> bool {
 
 fn cancelled_error() -> EngineError {
     EngineError {
-        message: "render cancelled".to_string(),
+        message: CANCELLED.to_string(),
         log: None,
     }
 }

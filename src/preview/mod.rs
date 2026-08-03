@@ -49,7 +49,6 @@ pub struct Preview {
     setup: Arc<RenderSetup>,
     tectonic_override: Option<String>,
     generation: u64,
-    in_flight: bool,
     in_flight_cancel: Option<Arc<AtomicBool>>,
     last_rendered_source: Option<String>,
     dirty: bool,
@@ -70,7 +69,6 @@ impl Preview {
             setup,
             tectonic_override: None,
             generation: 0,
-            in_flight: false,
             in_flight_cancel: None,
             last_rendered_source: None,
             dirty: false,
@@ -106,10 +104,12 @@ impl Preview {
         self.last_edit = Some(Instant::now());
     }
 
-    /// Forces an immediate render on the next frame.
+    /// Forces an immediate render on the next frame, bypassing the skip for
+    /// unchanged documents.
     pub fn request_render(&mut self) {
         self.dirty = true;
         self.last_edit = None;
+        self.last_rendered_source = None;
     }
 
     /// Re-reads completed render results from the worker thread.
@@ -130,7 +130,6 @@ impl Preview {
         }
 
         if let Some((source, result)) = result {
-            self.in_flight = false;
             self.in_flight_cancel = None;
             match result {
                 Ok((images, pdf)) => {
@@ -154,6 +153,10 @@ impl Preview {
                         images,
                         pdf,
                     });
+                }
+                Err(message) if message == engine::CANCELLED => {
+                    // Dropped because newer edits arrived; keep the previous
+                    // state instead of surfacing a spurious error.
                 }
                 Err(message) => {
                     self.state = PreviewState::Failed(message);
@@ -196,7 +199,6 @@ impl Preview {
         self.cancel_in_flight();
         self.dirty = false;
         self.generation += 1;
-        self.in_flight = true;
         let cancel = Arc::new(AtomicBool::new(false));
         self.in_flight_cancel = Some(cancel.clone());
         self.state = PreviewState::Rendering;

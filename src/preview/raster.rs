@@ -188,7 +188,7 @@ pub fn render_source(
     let bundle = setup.get(tectonic_override)?;
     let wrapped = crate::preview::tex::wrap_source(source);
     let tmp = tempfile::tempdir().map_err(|e| format!("cannot create temp dir: {e}"))?;
-    use crate::preview::engine::TexEngine;
+    use crate::preview::engine::{CANCELLED, TexEngine};
     let engine = crate::preview::engine::TectonicCli {
         binary: bundle.tectonic.clone(),
     };
@@ -206,7 +206,7 @@ pub fn render_source(
         }
     })?;
     if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
-        return Err("render cancelled".to_string());
+        return Err(CANCELLED.to_string());
     }
     let pdf = &pdfs[0];
     let pdf_bytes = fs::read(pdf).map_err(|e| format!("cannot read compiled PDF: {e}"))?;
