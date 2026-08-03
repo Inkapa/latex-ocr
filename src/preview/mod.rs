@@ -95,7 +95,7 @@ impl Preview {
     }
 
     pub fn engine_ready(&self) -> bool {
-        self.setup.get(self.tectonic_override.as_deref()).is_ok()
+        self.setup.is_ready()
     }
 
     /// Called whenever the document changes.
