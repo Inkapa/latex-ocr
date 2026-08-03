@@ -133,8 +133,7 @@ impl Preview {
                             if w == 0 || h == 0 {
                                 return None;
                             }
-                            let image =
-                                ColorImage::from_rgba_unmultiplied([w, h], &img.clone().into_raw());
+                            let image = ColorImage::from_rgba_unmultiplied([w, h], img.as_raw());
                             let name = format!("preview-page-{}", w * h);
                             Some(RenderedPage {
                                 texture: ctx.load_texture(name, image, TextureOptions::LINEAR),

@@ -328,7 +328,7 @@ impl LatexOcrApp {
         let (w, h) = (image.width() as usize, image.height() as usize);
         let texture = ctx.load_texture(
             "ocr-capture",
-            ColorImage::from_rgba_unmultiplied([w, h], &image.clone().into_raw()),
+            ColorImage::from_rgba_unmultiplied([w, h], image.as_raw()),
             TextureOptions::LINEAR,
         );
         let mut dialog = OcrDialog {
@@ -579,17 +579,6 @@ impl LatexOcrApp {
         if !matches!(self.snip, SnipState::Idle) {
             self.set_status("A capture is already in progress.");
             return;
-        }
-        let alive: Vec<_> = ctx.input(|i| {
-            i.raw
-                .viewports
-                .keys()
-                .copied()
-                .filter(|id| *id != egui::ViewportId::ROOT)
-                .collect()
-        });
-        if !alive.is_empty() {
-            log::debug!("snip start: {alive:?} still alive");
         }
         let monitor = match snapshot::monitor_at_cursor() {
             Ok(monitor) => monitor,
@@ -1090,15 +1079,15 @@ impl eframe::App for LatexOcrApp {
         self.discard_dialog(&ctx);
         self.ocr_window(&ctx);
 
-        // The snip overlay is its own transparent window on top of the desktop.
+        // The snip overlay is its own full-screen window above the desktop.
         if let SnipState::Overlay(state) = &self.snip {
             snip::show_viewport(&ctx, state);
         }
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        // Fully transparent so the snip overlay shows only what it paints.
-        // The main window is covered entirely by opaque panels.
+        // The main window is covered entirely by opaque panels, so the
+        // background color never shows.
         [0.0, 0.0, 0.0, 0.0]
     }
 }

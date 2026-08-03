@@ -1,9 +1,10 @@
-//! Full-screen transparent selection overlay for the snipping tool.
+//! Full-screen selection overlay for the snipping tool.
 //!
-//! The overlay is a borderless, always-on-top, transparent viewport that sits
-//! on top of the live desktop. It dims everything except the drag rectangle
-//! and reports the selected region back to the app when the mouse is released
-//! or Escape is pressed.
+//! The overlay is a borderless, always-on-top window that paints a frozen
+//! desktop snapshot behind the dim, so the selection stays readable no matter
+//! how window transparency is composited on a given monitor. It dims
+//! everything except the drag rectangle and reports the selected region back
+//! to the app when the mouse is released or Escape is pressed.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,8 +35,7 @@ pub struct OverlayState {
     pub viewport_id: ViewportId,
     /// The monitor the overlay currently covers.
     monitor: MonitorInfo,
-    /// Frozen desktop snapshot used as the overlay background and as the
-    /// source of the captured region.
+    /// Frozen desktop snapshot painted behind the dim.
     background: Option<Background>,
     /// Set once the user finishes the selection.
     pub outcome: Option<OverlayOutcome>,
@@ -51,8 +51,6 @@ pub struct OverlayState {
     /// Consecutive frames the window geometry did not match its monitor.
     /// Used to fall back to drawing even if the correction never settles.
     unsettled: u32,
-    /// Total frames rendered, for throttling diagnostics.
-    tick_count: u64,
 }
 
 /// A frozen desktop capture plus its GPU texture.
@@ -125,7 +123,6 @@ impl OverlayState {
             current: None,
             rendered_once: false,
             unsettled: 0,
-            tick_count: 0,
         }))
     }
 
@@ -260,13 +257,6 @@ fn tick(
         s.unsettled = 0;
     } else {
         s.unsettled = s.unsettled.saturating_add(1);
-    }
-    s.tick_count = s.tick_count.wrapping_add(1);
-    if s.tick_count.is_multiple_of(60) {
-        let viewports: Vec<_> = ctx.input(|i| i.raw.viewports.keys().copied().collect());
-        if viewports.len() > 2 {
-            log::debug!("snip: unexpected extra viewports alive: {viewports:?}");
-        }
     }
 
     let (monitor, dragging, start, current) = (s.monitor, s.dragging, s.start, s.current);
