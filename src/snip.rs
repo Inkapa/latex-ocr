@@ -86,10 +86,9 @@ const MIN_SELECTION: u32 = 8;
 
 impl OverlayState {
     /// Starts a snip on the given monitor and returns the shared state. The
-    /// background is a frozen desktop capture that the overlay paints behind
-    /// the dim, so the window is always fully covered even on monitors where
-    /// window transparency is not composited correctly.
-    pub fn begin(monitor: MonitorInfo, desktop: Option<VirtualDesktop>) -> Arc<Mutex<Self>> {
+    /// desktop background is delivered later by [`Self::set_background`]; until
+    /// then the overlay paints an opaque fill so it is never white.
+    pub fn begin(monitor: MonitorInfo) -> Arc<Mutex<Self>> {
         log::debug!(
             "snip begin: monitor x={} y={} {}x{} scale={}",
             monitor.x,
@@ -98,16 +97,10 @@ impl OverlayState {
             monitor.height,
             monitor.scale
         );
-        let background = desktop.map(|d| Background {
-            image: d.image,
-            origin_x: d.origin_x,
-            origin_y: d.origin_y,
-            texture: None,
-        });
         Arc::new(Mutex::new(Self {
             viewport_id: fresh_viewport_id(),
             monitor,
-            background,
+            background: None,
             outcome: None,
             // The "Snip & OCR" button is still held when we get here, so the
             // first press must not start a selection.
@@ -119,6 +112,16 @@ impl OverlayState {
             unsettled: 0,
             tick_count: 0,
         }))
+    }
+
+    /// Attaches the frozen desktop snapshot captured on the background thread.
+    pub fn set_background(&mut self, desktop: VirtualDesktop) {
+        self.background = Some(Background {
+            image: desktop.image,
+            origin_x: desktop.origin_x,
+            origin_y: desktop.origin_y,
+            texture: None,
+        });
     }
 
     /// The monitor this overlay currently covers.
@@ -463,10 +466,16 @@ fn draw(
 
     // Paint the frozen desktop first so the window is fully covered and can
     // never show white, even on monitors where window transparency is not
-    // composited correctly.
-    if let Some(bg) = background {
-        let uv = background_uv(monitor, bg);
-        painter.image(bg.texture.id(), screen, uv, Color32::WHITE);
+    // composited correctly. Until the background arrives the window gets an
+    // opaque fill for the same reason.
+    match background {
+        Some(bg) => {
+            let uv = background_uv(monitor, bg);
+            painter.image(bg.texture.id(), screen, uv, Color32::WHITE);
+        }
+        None => {
+            painter.rect_filled(screen, 0.0, Color32::from_rgb(0x18, 0x18, 0x1E));
+        }
     }
 
     // While the window is still moving onto the monitor under the cursor the

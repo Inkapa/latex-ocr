@@ -544,14 +544,19 @@ impl LatexOcrApp {
                 return;
             }
         };
-        let desktop = match snapshot::capture_virtual_desktop() {
-            Ok(desktop) => Some(desktop),
-            Err(message) => {
-                self.set_status(format!("Screen capture unavailable: {message}"));
-                return;
-            }
-        };
-        let state = snip::OverlayState::begin(monitor, desktop);
+        let state = snip::OverlayState::begin(monitor);
+        // The frozen desktop snapshot is captured on a background thread so the
+        // overlay can appear immediately; it is painted as soon as it arrives.
+        {
+            let state = Arc::clone(&state);
+            std::thread::Builder::new()
+                .name("snip-background".into())
+                .spawn(move || match snapshot::capture_virtual_desktop() {
+                    Ok(desktop) => state.lock().unwrap().set_background(desktop),
+                    Err(message) => log::warn!("background capture failed: {message}"),
+                })
+                .expect("spawn snip background thread");
+        }
         self.snip = SnipState::Overlay(state);
         self.set_status("Drag over the math to select it.  Esc to cancel.");
     }

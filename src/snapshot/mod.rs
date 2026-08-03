@@ -106,15 +106,43 @@ pub fn capture_virtual_desktop() -> Result<VirtualDesktop, String> {
     if width == 0 || height == 0 {
         return Err("no screen area to capture".to_string());
     }
+    // Capture the monitors concurrently, then stitch the results.
+    let captures: Vec<(MonitorInfo, _)> = all
+        .iter()
+        .map(|m| {
+            let m = *m;
+            let handle = std::thread::spawn(move || {
+                let monitor = Monitor::from_point(m.x, m.y).map_err(|e| e.to_string())?;
+                monitor
+                    .capture_region(0, 0, m.width, m.height)
+                    .map_err(|e| format!("screen capture failed: {e}"))
+            });
+            (m, handle)
+        })
+        .collect();
     let mut out = RgbaImage::new(width, height);
-    for m in all {
-        let monitor = Monitor::from_point(m.x, m.y).map_err(|e| e.to_string())?;
-        let img = monitor
-            .capture_region(0, 0, m.width, m.height)
-            .map_err(|e| format!("screen capture failed: {e}"))?;
-        let ox = (m.x - min_x) as i64;
-        let oy = (m.y - min_y) as i64;
-        image::imageops::replace(&mut out, &img, ox, oy);
+    let mut first_error: Option<String> = None;
+    for (m, handle) in captures {
+        match handle.join() {
+            Ok(Ok(img)) => {
+                let ox = (m.x - min_x) as i64;
+                let oy = (m.y - min_y) as i64;
+                image::imageops::replace(&mut out, &img, ox, oy);
+            }
+            Ok(Err(e)) => {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+            Err(_) => {
+                if first_error.is_none() {
+                    first_error = Some("screen capture thread panicked".to_string());
+                }
+            }
+        }
+    }
+    if let Some(e) = first_error {
+        return Err(e);
     }
     Ok(VirtualDesktop {
         image: out,
