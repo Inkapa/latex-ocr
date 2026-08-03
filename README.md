@@ -10,14 +10,16 @@ and for turning math on the screen back into LaTeX with a snipping tool.
 
 - **Live preview.** The right pane re-renders your document as you type,
   debounced and on a background thread so typing stays responsive.
+- **Export.** Save the rendered output as a PNG, JPEG or PDF from the preview
+  toolbar.
 - **LaTeX editor.** Monospace editor with line numbers, syntax highlighting
   (commands, comments, math mode) and Tab indentation.
 - **Math tools.** Menus for fractions, roots, sums, integrals, environments,
   text styles and Greek letters. Selections are wrapped in place.
 - **Files.** Open and save `.tex` files through the native file dialog.
-- **Snip & OCR.** Capture the screen, then drag a rectangle over any math in a
-  selection window to turn it into LaTeX. Works with any pix2tex (LaTeX-OCR)
-  compatible server.
+- **Snip & OCR.** Freeze the desktop, drag a rectangle over any math, and turn
+  it into LaTeX. Works with the bundled local ONNX models or any pix2tex
+  (LaTeX-OCR) compatible server.
 - **First-run friendly.** The LaTeX engine and PDF renderer are downloaded
   automatically on first use and cached. No system packages required.
 
@@ -136,8 +138,11 @@ or a plain-text body.
 - Type LaTeX on the left; the preview updates automatically (toggle with
   **Auto**).
 - Use **Insert** to add snippets, or select text and wrap it with a tool.
-- Click **Snip & OCR**, drag a rectangle over any math in the selection
-  window, and the recognized LaTeX is inserted at your cursor.
+- Click **Snip & OCR**, drag a rectangle over any math, and the recognized
+  LaTeX appears in a result window where it can be reviewed, copied or
+  inserted at the cursor.
+- Use **Save…** in the preview toolbar to export the rendered output as PNG,
+  JPEG or PDF.
 - **Save** your document to keep it for later. Closing with unsaved changes
   asks for confirmation.
 
@@ -184,3 +189,13 @@ TECTONIC_OVERRIDE=/path/to/tectonic cargo test --test render_manual -- --ignored
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Credits
+
+Created by Liam CORNU. The source lives at
+[https://github.com/Inkapa/latex-ocr](https://github.com/Inkapa/latex-ocr).
+
+Rendering is powered by [Tectonic](https://tectonic-typesetting.github.io/)
+and [pdfium](https://pdfium.googlesource.com/). The local OCR backend runs the
+[pix2tex](https://github.com/lukas-blecher/LaTeX-OCR) models through ONNX
+Runtime.
