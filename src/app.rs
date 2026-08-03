@@ -127,11 +127,19 @@ impl LatexOcrApp {
         app.preview.request_render();
         app.set_status("Welcome. Type LaTeX on the left, or use \"Snip & OCR\" to capture math from the screen.");
         // Screen capture initializes a Direct3D device on first use; warm it
-        // up in the background so the first snip opens without that delay.
+        // up in the background so the first snip opens without that delay. One
+        // monitor is enough to build the device.
         std::thread::Builder::new()
             .name("capture-warmup".into())
             .spawn(|| {
-                let _ = snapshot::capture_virtual_desktop();
+                if let Ok(m) = snapshot::monitor_at_cursor() {
+                    let _ = snapshot::capture_region(snapshot::Region {
+                        x: m.x,
+                        y: m.y,
+                        width: m.width,
+                        height: m.height,
+                    });
+                }
             })
             .expect("spawn capture warmup thread");
         app
@@ -230,12 +238,23 @@ impl LatexOcrApp {
                     guard.outcome = Some(snip::OverlayOutcome::Cancelled);
                 }
                 let outcome = guard.outcome;
+                // Crop the selection out of the frozen snapshot while we still
+                // hold it. Re-capturing the live screen here races with the
+                // overlay window tearing down and bakes its white clear frame in.
+                let cropped = match outcome {
+                    Some(snip::OverlayOutcome::Captured(region)) => guard.crop_background(region),
+                    _ => None,
+                };
                 drop(guard);
 
                 match outcome {
-                    Some(snip::OverlayOutcome::Captured(region)) => {
-                        self.start_capture(region);
-                    }
+                    Some(snip::OverlayOutcome::Captured(region)) => match cropped {
+                        Some(image) => {
+                            self.snip = SnipState::Idle;
+                            self.open_ocr_dialog(ctx, image);
+                        }
+                        None => self.start_capture(region),
+                    },
                     Some(snip::OverlayOutcome::Cancelled) => {
                         self.snip = SnipState::Idle;
                         self.set_status("Capture cancelled.");
@@ -604,9 +623,15 @@ impl LatexOcrApp {
             .name("snip-background".into())
             .spawn(move || {
                 let started = std::time::Instant::now();
-                let result = snapshot::capture_virtual_desktop().map(|desktop| {
-                    log::debug!("desktop snapshot captured in {:?}", started.elapsed());
-                    snip::OverlayState::begin(monitor, Some(desktop), &ctx)
+                let region = snapshot::Region {
+                    x: monitor.x,
+                    y: monitor.y,
+                    width: monitor.width,
+                    height: monitor.height,
+                };
+                let result = snapshot::capture_region(region).map(|image| {
+                    log::debug!("monitor snapshot captured in {:?}", started.elapsed());
+                    snip::OverlayState::begin(monitor, image, &ctx)
                 });
                 let _ = tx.send(result);
             })

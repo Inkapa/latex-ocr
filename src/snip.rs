@@ -6,17 +6,18 @@
 //! everything except the drag rectangle and reports the selected region back
 //! to the app when the mouse is released or Escape is pressed.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use eframe::egui::{
-    self, Color32, ColorImage, CursorIcon, Key, Pos2, Rect, Stroke, StrokeKind, TextureOptions,
-    Vec2, ViewportBuilder, ViewportCommand, ViewportId, pos2, vec2,
+    self, Color32, ColorImage, CursorIcon, Key, Pos2, Rect, Stroke, StrokeKind, TextureHandle,
+    TextureOptions, Vec2, ViewportBuilder, ViewportCommand, ViewportId, pos2, vec2,
 };
 use image::RgbaImage;
 
-use crate::snapshot::{self, MonitorInfo, Region, VirtualDesktop};
+use crate::snapshot::{self, MonitorInfo, Region};
 use crate::theme::ACCENT;
 
 /// How the user finished the selection.
@@ -35,8 +36,10 @@ pub struct OverlayState {
     pub viewport_id: ViewportId,
     /// The monitor the overlay currently covers.
     monitor: MonitorInfo,
-    /// Frozen desktop snapshot painted behind the dim.
-    background: Option<Background>,
+    /// Frozen per-monitor snapshots painted behind the dim, keyed by the
+    /// monitor's physical origin. Captured lazily as the overlay visits each
+    /// monitor, so opening only pays for the one under the cursor.
+    backgrounds: HashMap<(i32, i32), MonitorBackground>,
     /// Set once the user finishes the selection.
     pub outcome: Option<OverlayOutcome>,
     /// Button state from the previous frame, used to detect press/release edges.
@@ -53,22 +56,11 @@ pub struct OverlayState {
     unsettled: u32,
 }
 
-/// A frozen desktop capture plus its GPU texture.
-struct Background {
+/// A single monitor's frozen capture plus its GPU texture. The image is in that
+/// monitor's local pixels; the texture is drawn to fill the overlay window.
+struct MonitorBackground {
     image: RgbaImage,
-    origin_x: i32,
-    origin_y: i32,
-    texture: egui::TextureHandle,
-}
-
-/// The parts of a background needed for drawing, without the pixel data.
-#[derive(Clone)]
-struct BackgroundTexture {
-    texture: egui::TextureHandle,
-    origin_x: i32,
-    origin_y: i32,
-    image_w: u32,
-    image_h: u32,
+    texture: TextureHandle,
 }
 
 /// How many points of deviation is tolerated before the overlay is treated as
@@ -83,14 +75,11 @@ const UNSETTLED_DRAW_FALLBACK: u32 = 90;
 const MIN_SELECTION: u32 = 8;
 
 impl OverlayState {
-    /// Starts a snip on the given monitor and returns the shared state. The
-    /// desktop snapshot is turned into a texture here so the overlay opens
-    /// already fully painted and never shows white or a blank fill.
-    pub fn begin(
-        monitor: MonitorInfo,
-        desktop: Option<VirtualDesktop>,
-        ctx: &egui::Context,
-    ) -> Arc<Mutex<Self>> {
+    /// Starts a snip on the given monitor, using `image` (that monitor's frozen
+    /// capture) as the backdrop. The snapshot is turned into a texture here so
+    /// the overlay opens already fully painted and never shows white or a blank
+    /// fill. Other monitors are captured lazily on first visit.
+    pub fn begin(monitor: MonitorInfo, image: RgbaImage, ctx: &egui::Context) -> Arc<Mutex<Self>> {
         log::debug!(
             "snip begin: monitor x={} y={} {}x{} scale={}",
             monitor.x,
@@ -99,21 +88,12 @@ impl OverlayState {
             monitor.height,
             monitor.scale
         );
-        let background = desktop.map(|d| {
-            let size = [d.image.width() as usize, d.image.height() as usize];
-            let color = ColorImage::from_rgba_unmultiplied(size, d.image.as_raw());
-            let texture = ctx.load_texture("snip-background", color, TextureOptions::LINEAR);
-            Background {
-                image: d.image,
-                origin_x: d.origin_x,
-                origin_y: d.origin_y,
-                texture,
-            }
-        });
+        let mut backgrounds = HashMap::new();
+        backgrounds.insert((monitor.x, monitor.y), load_monitor_background(image, ctx));
         Arc::new(Mutex::new(Self {
             viewport_id: fresh_viewport_id(),
             monitor,
-            background,
+            backgrounds,
             outcome: None,
             // The "Snip & OCR" button is still held when we get here, so the
             // first press must not start a selection.
@@ -130,6 +110,69 @@ impl OverlayState {
     pub fn monitor(&self) -> MonitorInfo {
         self.monitor
     }
+
+    /// Crops the selected region out of the current monitor's frozen snapshot,
+    /// if one is held. Preferred over re-capturing the live screen, which would
+    /// race with this overlay window tearing down and bake its white clear frame
+    /// in. The selection is always clamped to `self.monitor`, so that monitor's
+    /// snapshot holds the pixels.
+    pub fn crop_background(&self, region: Region) -> Option<RgbaImage> {
+        let bg = self.backgrounds.get(&(self.monitor.x, self.monitor.y))?;
+        crop_region(&bg.image, self.monitor.x, self.monitor.y, region)
+    }
+}
+
+/// Uploads a monitor capture as a GPU texture the overlay can paint.
+fn load_monitor_background(image: RgbaImage, ctx: &egui::Context) -> MonitorBackground {
+    let size = [image.width() as usize, image.height() as usize];
+    let color = ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+    let texture = ctx.load_texture("snip-background", color, TextureOptions::LINEAR);
+    MonitorBackground { image, texture }
+}
+
+/// Captures `monitor`'s current pixels and uploads them as a texture. Runs on
+/// the calling thread; a single monitor grab is fast enough to do inline when
+/// the overlay first hops onto a monitor.
+fn capture_monitor_background(
+    monitor: MonitorInfo,
+    ctx: &egui::Context,
+) -> Option<MonitorBackground> {
+    let region = Region {
+        x: monitor.x,
+        y: monitor.y,
+        width: monitor.width,
+        height: monitor.height,
+    };
+    match snapshot::capture_region(region) {
+        Ok(image) => Some(load_monitor_background(image, ctx)),
+        Err(e) => {
+            log::debug!(
+                "snip: failed to capture monitor at ({},{}): {e}",
+                monitor.x,
+                monitor.y
+            );
+            None
+        }
+    }
+}
+
+/// Crops `region` (global physical pixels) out of a desktop snapshot whose
+/// top-left maps to (`origin_x`, `origin_y`). `None` when the region does not
+/// overlap the snapshot.
+fn crop_region(
+    image: &RgbaImage,
+    origin_x: i32,
+    origin_y: i32,
+    region: Region,
+) -> Option<RgbaImage> {
+    let x = (region.x - origin_x).max(0) as u32;
+    let y = (region.y - origin_y).max(0) as u32;
+    let width = region.width.min(image.width().saturating_sub(x));
+    let height = region.height.min(image.height().saturating_sub(y));
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(image::imageops::crop_imm(image, x, y, width, height).to_image())
 }
 
 fn fresh_viewport_id() -> ViewportId {
@@ -160,32 +203,17 @@ fn viewport_builder(monitor: MonitorInfo) -> ViewportBuilder {
 
 /// Shows the overlay viewport. Call once per frame while the snip is active.
 pub fn show_viewport(ctx: &egui::Context, state: &Arc<Mutex<OverlayState>>) {
-    let (viewport_id, builder, background) = {
+    let (viewport_id, builder) = {
         let state = state.lock().unwrap();
-        let background = state.background.as_ref().map(|bg| BackgroundTexture {
-            texture: bg.texture.clone(),
-            origin_x: bg.origin_x,
-            origin_y: bg.origin_y,
-            image_w: bg.image.width(),
-            image_h: bg.image.height(),
-        });
-        (
-            state.viewport_id,
-            viewport_builder(state.monitor),
-            background,
-        )
+        (state.viewport_id, viewport_builder(state.monitor))
     };
     let state = Arc::clone(state);
     ctx.show_viewport_deferred(viewport_id, builder, move |ui, _class| {
-        tick(ui, &state, background.clone());
+        tick(ui, &state);
     });
 }
 
-fn tick(
-    ui: &mut egui::Ui,
-    state: &Arc<Mutex<OverlayState>>,
-    background: Option<BackgroundTexture>,
-) {
+fn tick(ui: &mut egui::Ui, state: &Arc<Mutex<OverlayState>>) {
     let ctx = ui.ctx().clone();
 
     let mut s = state.lock().unwrap();
@@ -211,6 +239,14 @@ fn tick(
         && !s.monitor.contains(cx, cy)
         && let Ok(monitor) = snapshot::monitor_at(cx, cy)
     {
+        // Freeze this monitor before hopping onto it so it never flashes an
+        // unpainted (white) frame. Captured once, then cached.
+        let key = (monitor.x, monitor.y);
+        if !s.backgrounds.contains_key(&key)
+            && let Some(bg) = capture_monitor_background(monitor, &ctx)
+        {
+            s.backgrounds.insert(key, bg);
+        }
         s.monitor = monitor;
     }
     ensure_monitor_geometry(&ctx, s.monitor);
@@ -260,12 +296,16 @@ fn tick(
     }
 
     let (monitor, dragging, start, current) = (s.monitor, s.dragging, s.start, s.current);
+    let texture = s
+        .backgrounds
+        .get(&(monitor.x, monitor.y))
+        .map(|bg| bg.texture.clone());
     drop(s);
 
     draw(
         ui,
         &monitor,
-        background.as_ref(),
+        texture.as_ref(),
         dragging,
         start,
         current,
@@ -432,7 +472,7 @@ fn selection_region(
 fn draw(
     ui: &mut egui::Ui,
     monitor: &MonitorInfo,
-    background: Option<&BackgroundTexture>,
+    background: Option<&TextureHandle>,
     dragging: bool,
     start: Option<(i32, i32)>,
     current: Option<(i32, i32)>,
@@ -444,12 +484,13 @@ fn draw(
     let screen = ui.max_rect();
     let painter = ui.painter();
 
-    // Paint the frozen desktop first so the window is fully covered and can
-    // never show white, even on monitors where window transparency is not
-    // composited correctly.
-    if let Some(bg) = background {
-        let uv = background_uv(monitor, bg);
-        painter.image(bg.texture.id(), screen, uv, Color32::WHITE);
+    // Paint the frozen monitor snapshot first so the window is fully covered and
+    // can never show white, even on monitors where window transparency is not
+    // composited correctly. The texture is this monitor's own capture, so it
+    // fills the window one-to-one.
+    if let Some(texture) = background {
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        painter.image(texture.id(), screen, uv, Color32::WHITE);
     }
 
     // While the window is still moving onto the monitor under the cursor the
@@ -489,17 +530,6 @@ fn draw(
             painter.rect_filled(screen, 0.0, dim);
         }
     }
-}
-
-/// The UV rect that selects `monitor`'s region from the desktop snapshot.
-fn background_uv(monitor: &MonitorInfo, background: &BackgroundTexture) -> Rect {
-    let u0 = (monitor.x - background.origin_x) as f32 / background.image_w as f32;
-    let v0 = (monitor.y - background.origin_y) as f32 / background.image_h as f32;
-    let u1 =
-        (monitor.x + monitor.width as i32 - background.origin_x) as f32 / background.image_w as f32;
-    let v1 = (monitor.y + monitor.height as i32 - background.origin_y) as f32
-        / background.image_h as f32;
-    Rect::from_min_max(pos2(u0, v0), pos2(u1, v1))
 }
 
 /// Draws a small readout of the selection size just outside its corner.
@@ -576,6 +606,38 @@ mod tests {
     #[test]
     fn rejects_a_tiny_click() {
         assert!(selection_region((100, 100), (103, 103), monitor()).is_none());
+    }
+
+    #[test]
+    fn crops_region_from_snapshot() {
+        // 200x100 desktop whose top-left maps to global (-50, -20).
+        let mut image = RgbaImage::new(200, 100);
+        // Mark the pixel at global (10, 5) -> image (60, 25).
+        image.put_pixel(60, 25, image::Rgba([1, 2, 3, 4]));
+        let region = Region {
+            x: 10,
+            y: 5,
+            width: 40,
+            height: 30,
+        };
+        let cropped = crop_region(&image, -50, -20, region).unwrap();
+        assert_eq!((cropped.width(), cropped.height()), (40, 30));
+        // The marked pixel lands at the crop's top-left.
+        assert_eq!(cropped.get_pixel(0, 0), &image::Rgba([1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn crop_clamps_to_snapshot_bounds() {
+        let image = RgbaImage::new(100, 100);
+        // Region runs past the right/bottom edge; width/height clamp to fit.
+        let region = Region {
+            x: 80,
+            y: 80,
+            width: 50,
+            height: 50,
+        };
+        let cropped = crop_region(&image, 0, 0, region).unwrap();
+        assert_eq!((cropped.width(), cropped.height()), (20, 20));
     }
 
     #[test]
