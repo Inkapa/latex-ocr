@@ -5,10 +5,6 @@ A small, efficient cross-platform LaTeX editor with OCR.
 ![Platform: Windows / macOS / Linux](https://img.shields.io/badge/platform-windows%20%7C%20macos%20%7C%20linux-lightgrey)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
-Type LaTeX on the left, see the rendered result on the right. Snip a formula
-off the screen and get its LaTeX back. Rendering and OCR run locally; nothing
-is sent anywhere by default.
-
 ## Features
 
 - Live preview, re-rendered on a background thread as you type (debounced).
@@ -16,9 +12,9 @@ is sent anywhere by default.
 - Insert menu and a toolbar for fractions, roots, sums, integrals,
   environments, Greek letters, and text/math styles. Selections are wrapped in
   place.
-- Toggle the math at the cursor between inline (`$...$`) and display
+- Toggle between inline (`$...$`) and display
   (`\[...\]`) style.
-- Screen-snip OCR: select a formula on screen and get the LaTeX for it.
+- Screen-snip OCR: select a rendered formula on your screen(s) and get the LaTeX for it.
 - Two OCR backends: an on-device ONNX model (default) or a pix2tex-compatible
   HTTP server.
 - Export the preview as PNG, JPEG, or PDF.
