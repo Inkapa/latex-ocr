@@ -1,6 +1,7 @@
 //! The LaTeX source editor: a highlighted, line-numbered text area.
 
 mod highlight;
+mod math;
 pub mod snippet;
 
 use std::ops::Range;
@@ -11,6 +12,18 @@ use eframe::egui::text::{CCursor, CCursorRange, LayoutJob};
 use eframe::egui::{self, Color32, FontId, RichText, ScrollArea, TextEdit, TextStyle, Ui};
 
 use crate::theme;
+pub use math::MathMode;
+
+/// What the last math-mode conversion did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MathAction {
+    /// An existing math block was converted.
+    Toggled,
+    /// The selection was wrapped in math delimiters.
+    Wrapped,
+    /// Nothing to convert or wrap.
+    Noop,
+}
 
 pub struct Editor {
     pub text: String,
@@ -97,6 +110,74 @@ impl Editor {
         self.text.replace_range(start_byte..end_byte, content);
         let cursor = start + content.chars().count();
         self.pending_cursor = Some(CCursorRange::one(CCursor::new(cursor)));
+    }
+
+    /// The math style of the block at the cursor, if the cursor is in math.
+    pub fn math_block_mode(&self) -> Option<MathMode> {
+        let at = self.math_anchor();
+        math::find_block(&self.text, at).map(|b| b.mode)
+    }
+
+    /// Switches the math block at the cursor to `want`, or wraps the
+    /// selection in the matching delimiters when the cursor is not in math.
+    pub fn convert_math(&mut self, want: MathMode) -> MathAction {
+        let at = self.math_anchor();
+        match math::toggle(&mut self.text, at, want) {
+            Some(math::ToggleOutcome::Converted(cursor)) => {
+                self.pending_cursor = Some(CCursorRange::one(CCursor::new(cursor)));
+                MathAction::Toggled
+            }
+            Some(math::ToggleOutcome::NoChange) => MathAction::Noop,
+            None => self.wrap_selection(want),
+        }
+    }
+
+    /// Wraps the selection in the chosen math delimiters.
+    fn wrap_selection(&mut self, want: MathMode) -> MathAction {
+        let Some(range) = self.selected_char_range() else {
+            return MathAction::Noop;
+        };
+        if range.is_empty() {
+            return MathAction::Noop;
+        }
+        let content: String = self
+            .text
+            .chars()
+            .skip(range.start)
+            .take(range.end - range.start)
+            .collect();
+        let wrapped = match want {
+            MathMode::Inline => format!("${}$", content.trim()),
+            MathMode::Display => format!("\\[\n{content}\n\\]"),
+        };
+        let start_byte = char_to_byte(&self.text, range.start);
+        let end_byte = char_to_byte(&self.text, range.end);
+        self.text.replace_range(start_byte..end_byte, &wrapped);
+        let cursor = range.start + wrapped.chars().count();
+        self.pending_cursor = Some(CCursorRange::one(CCursor::new(cursor)));
+        MathAction::Wrapped
+    }
+
+    /// Wraps the selection in a style command, choosing the math variant
+    /// (`\mathbf`) or the text variant (`\textbf`) from the math context.
+    pub fn apply_style(&mut self, text_template: &str, math_template: &str) {
+        let at = self.math_anchor();
+        let template = if math::find_block(&self.text, at).is_some() {
+            math_template
+        } else {
+            text_template
+        };
+        self.insert_snippet(template);
+    }
+
+    /// The character position that math tools act on: the midpoint of the
+    /// selection, or the cursor.
+    fn math_anchor(&self) -> usize {
+        match self.selected_char_range() {
+            Some(range) if range.is_empty() => range.start,
+            Some(range) => (range.start + range.end) / 2,
+            None => 0,
+        }
     }
 
     /// A short title for the current document.
@@ -285,6 +366,48 @@ mod tests {
         e.cursor = Some(CCursorRange::two(CCursor::new(1), CCursor::new(2)));
         e.replace_selection("ZZ");
         assert_eq!(e.text, "aZZc");
+    }
+
+    #[test]
+    fn converts_math_block_to_display() {
+        let mut e = Editor::with_text("$x$".into());
+        e.cursor = Some(CCursorRange::one(CCursor::new(1)));
+        assert_eq!(e.convert_math(MathMode::Display), MathAction::Toggled);
+        assert_eq!(e.text, "\\[\nx\n\\]");
+        assert!(e.pending_cursor.is_some());
+    }
+
+    #[test]
+    fn converts_display_block_to_inline() {
+        let mut e = Editor::with_text("\\[\nx\n\\]".into());
+        e.cursor = Some(CCursorRange::one(CCursor::new(3)));
+        assert_eq!(e.convert_math(MathMode::Inline), MathAction::Toggled);
+        assert_eq!(e.text, "$x$");
+    }
+
+    #[test]
+    fn wraps_selection_in_math() {
+        let mut e = Editor::with_text("abc".into());
+        e.cursor = Some(CCursorRange::two(CCursor::new(1), CCursor::new(2)));
+        assert_eq!(e.convert_math(MathMode::Inline), MathAction::Wrapped);
+        assert_eq!(e.text, "a$b$c");
+    }
+
+    #[test]
+    fn no_math_no_selection_is_a_noop() {
+        let mut e = Editor::with_text("abc".into());
+        e.cursor = Some(CCursorRange::one(CCursor::new(1)));
+        assert_eq!(e.convert_math(MathMode::Inline), MathAction::Noop);
+        assert_eq!(e.text, "abc");
+    }
+
+    #[test]
+    fn reports_math_mode_at_cursor() {
+        let mut e = Editor::with_text("text $x$".into());
+        e.cursor = Some(CCursorRange::one(CCursor::new(7)));
+        assert_eq!(e.math_block_mode(), Some(MathMode::Inline));
+        e.cursor = Some(CCursorRange::one(CCursor::new(2)));
+        assert_eq!(e.math_block_mode(), None);
     }
 
     #[test]

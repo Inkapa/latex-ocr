@@ -9,8 +9,8 @@ use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 use image::RgbaImage;
 
 use crate::editor;
-use crate::editor::Editor;
 use crate::editor::snippet;
+use crate::editor::{Editor, MathAction, MathMode};
 use crate::ocr::beautify;
 use crate::ocr::local::LocalOcrBackend;
 use crate::ocr::provision;
@@ -620,10 +620,77 @@ impl LatexOcrApp {
                     .inner_margin(egui::Margin::same(10)),
             )
             .show(ui, |ui| {
+                self.editor_toolbar(ui);
+                ui.add_space(6.0);
                 if self.editor.show(ui) {
                     self.preview.mark_edited();
                 }
             });
+    }
+
+    /// The editing toolbar: math-mode toggle, text and math style buttons.
+    fn editor_toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let mode = self.editor.math_block_mode();
+            if ui
+                .selectable_label(
+                    mode == Some(MathMode::Inline),
+                    egui::RichText::new("$x$").monospace(),
+                )
+                .on_hover_text(
+                    "Switch the math at the cursor to inline ($...$). \
+                     With a selection, wrap it instead.",
+                )
+                .clicked()
+            {
+                self.apply_math_mode(MathMode::Inline);
+            }
+            if ui
+                .selectable_label(mode == Some(MathMode::Display), "Display")
+                .on_hover_text(
+                    "Switch the math at the cursor to display (\\[...\\]). \
+                     With a selection, wrap it instead.",
+                )
+                .clicked()
+            {
+                self.apply_math_mode(MathMode::Display);
+            }
+
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            for (icon, tip, text_tpl, math_tpl) in STYLE_BUTTONS {
+                if ui.button(icon).on_hover_text(tip).clicked() {
+                    self.editor.apply_style(text_tpl, math_tpl);
+                }
+            }
+
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            for (icon, tip, template) in MATH_QUICK {
+                if ui.button(icon).on_hover_text(tip).clicked() {
+                    self.editor.insert_math_snippet(template);
+                }
+            }
+        });
+    }
+
+    fn apply_math_mode(&mut self, want: MathMode) {
+        match self.editor.convert_math(want) {
+            MathAction::Toggled => {
+                self.set_status("Switched the math block between inline and display.");
+            }
+            MathAction::Wrapped => {
+                self.set_status("Wrapped the selection in math delimiters.");
+            }
+            MathAction::Noop => {
+                self.set_status("Place the cursor inside math, or select text to wrap.");
+            }
+        }
     }
 
     fn preview_panel(&mut self, ui: &mut egui::Ui) {
@@ -1045,6 +1112,43 @@ enum OcrAction {
     Copy(String),
     Retry,
 }
+
+/// Style buttons from the editor toolbar: icon, tooltip, text template and
+/// math template. Templates wrap the selection via the snippet markers.
+const STYLE_BUTTONS: [(&str, &str, &str, &str); 4] = [
+    (
+        "B",
+        "Bold (\\textbf / \\mathbf)",
+        "\\textbf{@s@|}",
+        "\\mathbf{@s@|}",
+    ),
+    (
+        "I",
+        "Italic (\\textit / \\mathit)",
+        "\\textit{@s@|}",
+        "\\mathit{@s@|}",
+    ),
+    (
+        "R",
+        "Roman (\\textrm / \\mathrm)",
+        "\\textrm{@s@|}",
+        "\\mathrm{@s@|}",
+    ),
+    (
+        "Tt",
+        "Code (\\texttt / \\mathtt)",
+        "\\texttt{@s@|}",
+        "\\mathtt{@s@|}",
+    ),
+];
+
+/// Math operation buttons from the editor toolbar: icon, tooltip, template.
+const MATH_QUICK: [(&str, &str, &str); 4] = [
+    ("x²", "Superscript", "@s@^{@|@}"),
+    ("x₂", "Subscript", "@s@_{@|@}"),
+    ("√", "Square root", "\\sqrt{@s@|}"),
+    ("a/b", "Fraction", "\\frac{@s@|}{}"),
+];
 
 impl eframe::App for LatexOcrApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {

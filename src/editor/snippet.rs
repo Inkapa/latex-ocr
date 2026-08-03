@@ -292,21 +292,8 @@ pub const GREEK: &[Snippet] = &[
 /// True when the text before the cursor is already inside math mode, so math
 /// snippets can be inserted raw instead of being wrapped again.
 pub fn in_math_context(before: &str) -> bool {
-    let mut dollars = 0;
-    let mut chars = before.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            chars.next(); // skip the escaped character
-        } else if c == '$' {
-            dollars += 1;
-        }
-    }
-    if dollars % 2 == 1 {
-        return true;
-    }
-    let opens = before.matches("\\begin{").count();
-    let closes = before.matches("\\end{").count();
-    opens > closes
+    let at = before.chars().count();
+    crate::editor::math::find_block(before, at).is_some()
 }
 
 /// Applies a snippet template to `text`, replacing `selection` (if any).

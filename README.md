@@ -13,6 +13,12 @@ A small cross-platform LaTeX editor with OCR.
   (commands, comments, math mode) and Tab indentation.
 - **Math snippets.** Menus for fractions, roots, sums, integrals, environments,
   text styles and Greek letters. Selections are wrapped in place.
+- **Math toolbar.** Word-style buttons for bold, italic, roman and code styles
+  that choose the text or math command by context, plus one-click superscript,
+  subscript, roots and fractions.
+- **Inline/display toggle.** Switch the math at the cursor between inline
+  (`$...$`) and display (`\[...\]`) style without touching the content; the
+  toolbar also wraps a selection when the cursor is not in math.
 - **Screen-snip OCR.** Freeze the screen, select a formula, and OCR returns
   the corresponding LaTeX for review or insertion.
 - **Two OCR backends.** An on-device ONNX engine (default) and an optional
@@ -67,6 +73,8 @@ section below).
 - Type LaTeX on the left; the preview updates automatically. Use **Auto** to
   toggle live re-rendering or **Render now** to force it.
 - Add math with the **Insert** menu, or select text and wrap it with a tool.
+  The toolbar above the editor switches math between inline and display style
+  and applies text and math styles to the selection.
 - Click **Snip & OCR**, drag a rectangle over a formula, and review the result
   in the OCR window. Insert it at the cursor or copy it.
 - Use **Save…** in the preview toolbar to export the rendered output as PNG,
