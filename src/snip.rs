@@ -245,17 +245,26 @@ fn pointer_state(ctx: &egui::Context, monitor: MonitorInfo) -> (Option<(i32, i32
     }
 }
 
+/// The logical (points) size the overlay must have to exactly cover `monitor`.
+fn target_logical_size(monitor: MonitorInfo) -> Vec2 {
+    let scale = monitor.scale.max(0.1);
+    vec2(monitor.width as f32 / scale, monitor.height as f32 / scale)
+}
+
 /// Keeps the overlay window covering exactly `monitor`'s physical bounds.
 ///
-/// The position correction is converted through the window's current
-/// pixels-per-point so the physical move is exact. The size correction is
-/// converted through the target monitor's own scale factor: those points then
-/// resolve to the correct physical size once the window lands on that monitor,
-/// instead of a wrong intermediate size when the two DPI scales differ
-/// (which leaves the surface undefined and paints a white box).
+/// The position is corrected in physical space through the window's current
+/// pixels-per-point, so the move is exact. The size is corrected in logical
+/// space to the target monitor's scale: Windows rescales a window to keep its
+/// logical size when it crosses a DPI boundary, so keeping the logical size at
+/// `physical / scale` makes the window land at the correct physical size on the
+/// new monitor. Correcting in logical space also catches crossings between
+/// monitors that share a physical size but differ in scale, which a physical
+/// comparison would miss and which would otherwise leave the window at a wrong
+/// DPI-scaled size.
 fn ensure_monitor_geometry(ctx: &egui::Context, monitor: MonitorInfo) {
     let ppp = ctx.input(|i| i.pixels_per_point).max(0.1);
-    let Some((position_drift, size_drift)) = geometry_drift(ctx, monitor) else {
+    let Some(position_drift) = position_drift(ctx, monitor) else {
         return; // no geometry reported yet, e.g. before the first frame
     };
     if position_drift.x.abs() > GEOMETRY_TOLERANCE || position_drift.y.abs() > GEOMETRY_TOLERANCE {
@@ -271,19 +280,21 @@ fn ensure_monitor_geometry(ctx: &egui::Context, monitor: MonitorInfo) {
             monitor.y as f32 / ppp,
         )));
     }
-    if size_drift.x.abs() > GEOMETRY_TOLERANCE || size_drift.y.abs() > GEOMETRY_TOLERANCE {
+    let Some(inner_rect) = ctx.input(|i| i.viewport().inner_rect) else {
+        return;
+    };
+    let target = target_logical_size(monitor);
+    let logical_drift = vec2(inner_rect.width(), inner_rect.height()) - target;
+    if logical_drift.x.abs() > GEOMETRY_TOLERANCE || logical_drift.y.abs() > GEOMETRY_TOLERANCE {
         log::debug!(
-            "snip geometry: size {}x{} -> want {}x{} (ppp {})",
-            (monitor.width as f32 + size_drift.x).round(),
-            (monitor.height as f32 + size_drift.y).round(),
-            monitor.width,
-            monitor.height,
+            "snip geometry: size {}x{} -> want {}x{} (scale {})",
+            inner_rect.width().round(),
+            inner_rect.height().round(),
+            target.x.round(),
+            target.y.round(),
             monitor.scale
         );
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(
-            monitor.width as f32 / monitor.scale.max(0.1),
-            monitor.height as f32 / monitor.scale.max(0.1),
-        )));
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(target));
     }
 }
 
@@ -297,22 +308,23 @@ fn window_geometry(ctx: &egui::Context) -> Option<(Vec2, Vec2)> {
     })
 }
 
-/// How far the window's actual geometry is from `monitor`, in physical pixels.
-fn geometry_drift(ctx: &egui::Context, monitor: MonitorInfo) -> Option<(Vec2, Vec2)> {
-    let (position, size) = window_geometry(ctx)?;
-    let position_drift = position - vec2(monitor.x as f32, monitor.y as f32);
-    let size_drift = size - vec2(monitor.width as f32, monitor.height as f32);
-    Some((position_drift, size_drift))
+/// How far the window's physical position is from `monitor`, in pixels.
+fn position_drift(ctx: &egui::Context, monitor: MonitorInfo) -> Option<Vec2> {
+    let (position, _) = window_geometry(ctx)?;
+    Some(position - vec2(monitor.x as f32, monitor.y as f32))
 }
 
 /// Whether the window currently covers `monitor` closely enough to be useful.
 fn geometry_settled(ctx: &egui::Context, monitor: MonitorInfo) -> bool {
-    geometry_drift(ctx, monitor).is_some_and(|(position_drift, size_drift)| {
-        position_drift.x.abs() <= GEOMETRY_TOLERANCE
-            && position_drift.y.abs() <= GEOMETRY_TOLERANCE
-            && size_drift.x.abs() <= GEOMETRY_TOLERANCE
-            && size_drift.y.abs() <= GEOMETRY_TOLERANCE
-    })
+    let position_ok = position_drift(ctx, monitor).is_some_and(|drift| {
+        drift.x.abs() <= GEOMETRY_TOLERANCE && drift.y.abs() <= GEOMETRY_TOLERANCE
+    });
+    let size_ok = ctx.input(|i| i.viewport().inner_rect).is_some_and(|inner| {
+        let target = target_logical_size(monitor);
+        (inner.width() - target.x).abs() <= GEOMETRY_TOLERANCE
+            && (inner.height() - target.y).abs() <= GEOMETRY_TOLERANCE
+    });
+    position_ok && size_ok
 }
 
 /// Maps a point in the overlay's local points to global physical pixels.
