@@ -192,22 +192,28 @@ impl Editor {
 
     /// Renders the editor; returns `true` when the text changed this frame.
     pub fn show(&mut self, ui: &mut Ui) -> bool {
-        // Tab indentation: insert two spaces instead of moving focus. This must
-        // run before the TextEdit processes the key event.
-        let tab_pressed = ui.input(|i| i.key_pressed(egui::Key::Tab));
-        if tab_pressed && self.tab_insert {
-            self.insert_snippet("  ");
-        }
+        // Tab indentation: insert two spaces instead of the TextEdit's literal
+        // tab or egui's focus navigation. Only while the editor has focus, so
+        // Tab keeps working normally in other widgets; the event is consumed
+        // so the TextEdit does not also insert a tab character.
+        let tab_pressed = ui.input(|i| i.key_pressed(egui::Key::Tab) && !i.modifiers.shift);
 
         let line_count = self.text.lines().count().max(1);
         let digits = line_count.to_string().len().max(2);
         let gutter_color = theme::DIM_TEXT;
 
-        ScrollArea::both()
+        ScrollArea::vertical()
             .id_salt("editor_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let changed = ui.horizontal_top(|ui| {
+                    let editor_id = ui.make_persistent_id("editor_text");
+                    if tab_pressed && self.tab_insert && ui.memory(|m| m.has_focus(editor_id)) {
+                        ui.input_mut(|i| {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                        });
+                        self.insert_snippet("  ");
+                    }
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         for n in 1..=line_count {
@@ -220,7 +226,6 @@ impl Editor {
                     });
 
                     let available = ui.available_width();
-                    let desired_width = available.max(12_000.0);
 
                     let mut layouter = |ui: &Ui,
                                         text: &dyn egui::TextBuffer,
@@ -236,7 +241,7 @@ impl Editor {
                     let mut output = TextEdit::multiline(&mut self.text)
                         .id_salt("editor_text")
                         .font(TextStyle::Monospace)
-                        .desired_width(desired_width)
+                        .desired_width(available)
                         .desired_rows(line_count.max(24))
                         .lock_focus(true)
                         .text_color(theme::TOKEN_DEFAULT)
@@ -279,7 +284,8 @@ fn char_to_byte(text: &str, char_idx: usize) -> usize {
         .unwrap_or(text.len())
 }
 
-fn text_before(text: &str, char_idx: usize) -> String {
+/// The text up to `char_idx`, in character indices.
+pub(crate) fn text_before(text: &str, char_idx: usize) -> String {
     let byte = char_to_byte(text, char_idx);
     text[..byte].to_string()
 }
