@@ -82,6 +82,11 @@ fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), String> {
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     for entry in tar.entries().map_err(|e| e.to_string())? {
         let mut entry = entry.map_err(|e| e.to_string())?;
+        let kind = entry.header().entry_type();
+        if kind.is_symlink() || kind.is_hard_link() {
+            // Links could redirect extraction outside the destination.
+            continue;
+        }
         entry
             .unpack_in(dest)
             .map_err(|e| format!("cannot extract archive: {e}"))?;
