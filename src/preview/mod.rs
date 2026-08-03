@@ -197,8 +197,7 @@ impl Preview {
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.enabled, "Auto")
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            checkbox(ui, &mut self.enabled, "Auto");
             if ui.button("Render now").clicked() {
                 self.request_render();
             }
@@ -221,8 +220,7 @@ impl Preview {
             if ui.button("+").on_hover_text("Zoom in").clicked() {
                 self.zoom = (self.zoom * 1.25).min(4.0);
             }
-            ui.checkbox(&mut self.fit_width, "Fit width")
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            checkbox(ui, &mut self.fit_width, "Fit width");
             if let Some((message, since)) = &self.save_message
                 && since.elapsed() < Duration::from_secs(5)
             {
@@ -367,4 +365,17 @@ impl Preview {
         };
         self.save_message = Some((message, Instant::now()));
     }
+}
+
+/// A checkbox whose box and label are laid out together and centered as one
+/// unit, so every checkbox in a toolbar row lines up vertically.
+fn checkbox(ui: &mut egui::Ui, checked: &mut bool, label: &str) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let response = ui.add(egui::Checkbox::without_text(checked));
+        ui.label(egui::RichText::new(label));
+        response
+    })
+    .inner
+    .on_hover_cursor(egui::CursorIcon::PointingHand);
 }
