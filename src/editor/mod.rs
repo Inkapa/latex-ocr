@@ -203,7 +203,8 @@ fn text_before(text: &str, char_idx: usize) -> String {
     text[..byte].to_string()
 }
 
-fn apply_highlight(text: &str, font_id: &FontId, job: &mut LayoutJob) {
+/// Fills a layout job with syntax-colored LaTeX spans.
+pub fn apply_highlight(text: &str, font_id: &FontId, job: &mut LayoutJob) {
     use eframe::egui::text::TextFormat;
     use highlight::TokenKind;
 

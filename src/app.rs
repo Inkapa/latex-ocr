@@ -901,11 +901,22 @@ impl LatexOcrApp {
                         ui.colored_label(egui::Color32::from_rgb(0xE0, 0x6C, 0x75), error);
                         ui.add_space(4.0);
                     }
+                    let mut layouter = |ui: &egui::Ui,
+                                        text: &dyn egui::TextBuffer,
+                                        wrap_width: f32|
+                     -> std::sync::Arc<egui::Galley> {
+                        let mut job = egui::text::LayoutJob::default();
+                        job.wrap.max_width = wrap_width;
+                        let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+                        editor::apply_highlight(text.as_str(), &font_id, &mut job);
+                        ui.fonts_mut(|f| f.layout_job(job))
+                    };
                     ui.add(
                         egui::TextEdit::multiline(&mut dialog.latex)
                             .font(egui::TextStyle::Monospace)
                             .desired_rows(5)
-                            .desired_width(f32::INFINITY),
+                            .desired_width(f32::INFINITY)
+                            .layouter(&mut layouter),
                     );
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
