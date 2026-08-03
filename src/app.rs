@@ -82,6 +82,7 @@ pub struct LatexOcrApp {
     rename_before: String,
     focus_rename: bool,
     ocr_test_result: Option<String>,
+    prepare_started: Option<Instant>,
 }
 
 impl LatexOcrApp {
@@ -117,11 +118,20 @@ impl LatexOcrApp {
             rename_before: String::new(),
             focus_rename: false,
             ocr_test_result: None,
+            prepare_started: None,
         };
         app.sync_edits_from_settings();
         app.prewarm_engine();
         app.preview.request_render();
         app.set_status("Welcome. Type LaTeX on the left, or use \"Snip & OCR\" to capture math from the screen.");
+        // Screen capture initializes a Direct3D device on first use; warm it
+        // up in the background so the first snip opens without that delay.
+        std::thread::Builder::new()
+            .name("capture-warmup".into())
+            .spawn(|| {
+                let _ = snapshot::capture_virtual_desktop();
+            })
+            .expect("spawn capture warmup thread");
         app
     }
 
@@ -261,10 +271,12 @@ impl LatexOcrApp {
             }
             SnipState::Preparing(rx) => match rx.try_recv() {
                 Ok(Ok(state)) => {
+                    self.prepare_started = None;
                     self.snip = SnipState::Overlay(state);
                     self.set_status("Drag over the math to select it.  Esc to cancel.");
                 }
                 Ok(Err(message)) => {
+                    self.prepare_started = None;
                     self.snip = SnipState::Idle;
                     self.set_status(format!("Screen capture failed: {message}"));
                 }
@@ -272,6 +284,7 @@ impl LatexOcrApp {
                     ctx.request_repaint_after(Duration::from_millis(16));
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    self.prepare_started = None;
                     self.snip = SnipState::Idle;
                     self.set_status("Screen capture failed.");
                 }
@@ -602,6 +615,7 @@ impl LatexOcrApp {
             })
             .expect("spawn snip background thread");
         self.snip = SnipState::Preparing(rx);
+        self.prepare_started = Some(Instant::now());
         self.set_status("Preparing screen capture…");
     }
 
@@ -645,6 +659,18 @@ impl LatexOcrApp {
                     self.engine_message.clone()
                 };
                 ui.label(egui::RichText::new(text).weak().small());
+                if matches!(self.snip, SnipState::Preparing(_)) {
+                    let elapsed = self
+                        .prepare_started
+                        .map(|t| t.elapsed())
+                        .unwrap_or_default();
+                    let progress = (elapsed.as_secs_f32() / 0.7).clamp(0.0, 1.0);
+                    ui.add(
+                        egui::ProgressBar::new(progress)
+                            .desired_width(140.0)
+                            .fill(theme::ACCENT),
+                    );
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if self.engine_message_slot.is_some() {
                         ui.add(egui::Spinner::new().size(12.0));
@@ -739,6 +765,12 @@ impl LatexOcrApp {
                 ui.heading("LaTeX engine");
                 ui.label("tectonic executable (leave empty for auto):");
                 ui.add(egui::TextEdit::singleline(&mut self.tectonic_edit).desired_width(340.0));
+                ui.add_space(12.0);
+
+                ui.heading("About");
+                ui.label(format!("LaTeX OCR {}", env!("CARGO_PKG_VERSION")));
+                ui.label("Created by Liam CORNU");
+                ui.hyperlink("https://github.com/Inkapa/latex-ocr");
                 ui.add_space(12.0);
 
                 ui.horizontal(|ui| {
