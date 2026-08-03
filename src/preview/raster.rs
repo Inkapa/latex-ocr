@@ -82,6 +82,16 @@ impl RenderSetup {
         slot.as_ref().unwrap().clone()
     }
 
+    /// Whether a usable engine bundle is already cached. Never blocks: returns
+    /// `false` while another thread is still provisioning it, so the UI can
+    /// poll this without freezing on a first-run download.
+    pub fn is_ready(&self) -> bool {
+        match self.inner.try_lock() {
+            Ok(slot) => slot.as_ref().is_some_and(Result::is_ok),
+            Err(_) => false,
+        }
+    }
+
     pub fn reset(&self) {
         *self.inner.lock().unwrap() = None;
     }
