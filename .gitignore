@@ -1,0 +1,7 @@
+/target
+.idea/
+__pycache__/
+*.pyc
+AGENTS.md
+opencode.json
+.opencode/
