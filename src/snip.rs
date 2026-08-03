@@ -60,7 +60,7 @@ struct Background {
     image: RgbaImage,
     origin_x: i32,
     origin_y: i32,
-    texture: Option<egui::TextureHandle>,
+    texture: egui::TextureHandle,
 }
 
 /// The parts of a background needed for drawing, without the pixel data.
@@ -86,9 +86,13 @@ const MIN_SELECTION: u32 = 8;
 
 impl OverlayState {
     /// Starts a snip on the given monitor and returns the shared state. The
-    /// desktop background is delivered later by [`Self::set_background`]; until
-    /// then the overlay paints an opaque fill so it is never white.
-    pub fn begin(monitor: MonitorInfo) -> Arc<Mutex<Self>> {
+    /// desktop snapshot is turned into a texture here so the overlay opens
+    /// already fully painted and never shows white or a blank fill.
+    pub fn begin(
+        monitor: MonitorInfo,
+        desktop: Option<VirtualDesktop>,
+        ctx: &egui::Context,
+    ) -> Arc<Mutex<Self>> {
         log::debug!(
             "snip begin: monitor x={} y={} {}x{} scale={}",
             monitor.x,
@@ -97,10 +101,21 @@ impl OverlayState {
             monitor.height,
             monitor.scale
         );
+        let background = desktop.map(|d| {
+            let size = [d.image.width() as usize, d.image.height() as usize];
+            let color = ColorImage::from_rgba_unmultiplied(size, d.image.as_raw());
+            let texture = ctx.load_texture("snip-background", color, TextureOptions::LINEAR);
+            Background {
+                image: d.image,
+                origin_x: d.origin_x,
+                origin_y: d.origin_y,
+                texture,
+            }
+        });
         Arc::new(Mutex::new(Self {
             viewport_id: fresh_viewport_id(),
             monitor,
-            background: None,
+            background,
             outcome: None,
             // The "Snip & OCR" button is still held when we get here, so the
             // first press must not start a selection.
@@ -112,16 +127,6 @@ impl OverlayState {
             unsettled: 0,
             tick_count: 0,
         }))
-    }
-
-    /// Attaches the frozen desktop snapshot captured on the background thread.
-    pub fn set_background(&mut self, desktop: VirtualDesktop) {
-        self.background = Some(Background {
-            image: desktop.image,
-            origin_x: desktop.origin_x,
-            origin_y: desktop.origin_y,
-            texture: None,
-        });
     }
 
     /// The monitor this overlay currently covers.
@@ -167,16 +172,9 @@ fn viewport_builder(monitor: MonitorInfo) -> ViewportBuilder {
 /// Shows the overlay viewport. Call once per frame while the snip is active.
 pub fn show_viewport(ctx: &egui::Context, state: &Arc<Mutex<OverlayState>>) {
     let (viewport_id, builder, background) = {
-        let mut state = state.lock().unwrap();
-        if let Some(bg) = &mut state.background
-            && bg.texture.is_none()
-        {
-            let size = [bg.image.width() as usize, bg.image.height() as usize];
-            let color = ColorImage::from_rgba_unmultiplied(size, bg.image.as_raw());
-            bg.texture = Some(ctx.load_texture("snip-background", color, TextureOptions::LINEAR));
-        }
+        let state = state.lock().unwrap();
         let background = state.background.as_ref().map(|bg| BackgroundTexture {
-            texture: bg.texture.clone().unwrap(),
+            texture: bg.texture.clone(),
             origin_x: bg.origin_x,
             origin_y: bg.origin_y,
             image_w: bg.image.width(),
@@ -466,16 +464,10 @@ fn draw(
 
     // Paint the frozen desktop first so the window is fully covered and can
     // never show white, even on monitors where window transparency is not
-    // composited correctly. Until the background arrives the window gets an
-    // opaque fill for the same reason.
-    match background {
-        Some(bg) => {
-            let uv = background_uv(monitor, bg);
-            painter.image(bg.texture.id(), screen, uv, Color32::WHITE);
-        }
-        None => {
-            painter.rect_filled(screen, 0.0, Color32::from_rgb(0x18, 0x18, 0x1E));
-        }
+    // composited correctly.
+    if let Some(bg) = background {
+        let uv = background_uv(monitor, bg);
+        painter.image(bg.texture.id(), screen, uv, Color32::WHITE);
     }
 
     // While the window is still moving onto the monitor under the cursor the

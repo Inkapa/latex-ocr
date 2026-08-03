@@ -42,6 +42,8 @@ impl DiscardAction {
 
 enum SnipState {
     Idle,
+    /// Capturing the desktop snapshot before the overlay opens.
+    Preparing(mpsc::Receiver<Result<Arc<Mutex<snip::OverlayState>>, String>>),
     Overlay(Arc<Mutex<snip::OverlayState>>),
 }
 
@@ -249,6 +251,23 @@ impl LatexOcrApp {
                     }
                 }
             }
+            SnipState::Preparing(rx) => match rx.try_recv() {
+                Ok(Ok(state)) => {
+                    self.snip = SnipState::Overlay(state);
+                    self.set_status("Drag over the math to select it.  Esc to cancel.");
+                }
+                Ok(Err(message)) => {
+                    self.snip = SnipState::Idle;
+                    self.set_status(format!("Screen capture failed: {message}"));
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(Duration::from_millis(16));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.snip = SnipState::Idle;
+                    self.set_status("Screen capture failed.");
+                }
+            },
             SnipState::Idle => {
                 // Safety net: close any overlay windows left over from an
                 // earlier snip that failed to tear down.
@@ -544,21 +563,24 @@ impl LatexOcrApp {
                 return;
             }
         };
-        let state = snip::OverlayState::begin(monitor);
-        // The frozen desktop snapshot is captured on a background thread so the
-        // overlay can appear immediately; it is painted as soon as it arrives.
-        {
-            let state = Arc::clone(&state);
-            std::thread::Builder::new()
-                .name("snip-background".into())
-                .spawn(move || match snapshot::capture_virtual_desktop() {
-                    Ok(desktop) => state.lock().unwrap().set_background(desktop),
-                    Err(message) => log::warn!("background capture failed: {message}"),
-                })
-                .expect("spawn snip background thread");
-        }
-        self.snip = SnipState::Overlay(state);
-        self.set_status("Drag over the math to select it.  Esc to cancel.");
+        // The desktop snapshot is captured and uploaded on a background thread
+        // so the overlay opens already fully painted. The status message gives
+        // feedback during the brief capture.
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("snip-background".into())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                let result = snapshot::capture_virtual_desktop().map(|desktop| {
+                    log::debug!("desktop snapshot captured in {:?}", started.elapsed());
+                    snip::OverlayState::begin(monitor, Some(desktop), &ctx)
+                });
+                let _ = tx.send(result);
+            })
+            .expect("spawn snip background thread");
+        self.snip = SnipState::Preparing(rx);
+        self.set_status("Preparing screen capture…");
     }
 
     fn editor_panel(&mut self, ui: &mut egui::Ui) {
