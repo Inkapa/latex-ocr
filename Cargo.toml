@@ -1,0 +1,30 @@
+[package]
+name = "latex-ocr"
+version = "0.1.0"
+edition = "2024"
+description = "A cross-platform LaTeX editor with live preview, screen-snip OCR, and math tools"
+license = "MIT"
+default-run = "latex-ocr"
+
+[dependencies]
+dirs = "=6.0.0"
+eframe = { version = "=0.35.0", features = ["wgpu"] }
+env_logger = "=0.11.11"
+fancy-regex = "=0.19.0"
+flate2 = "=1.1.9"
+image = "=0.25.10"
+log = "=0.4.33"
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic", "ndarray", "api-27"] }
+pdfium-render = "=0.9.3"
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "default-tls", "json", "multipart"] }
+rfd = "=0.17.2"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+tar = "=0.4.46"
+tempfile = "=3.27.0"
+toml = "=1.1.4"
+xcap = "=0.9.8"
+zip = "=8.6.0"
+
+[dev-dependencies]
+tiny_http = "=0.12.0"
