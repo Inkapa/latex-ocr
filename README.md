@@ -1,7 +1,6 @@
 # LaTeX OCR
 
-A desktop LaTeX editor with a live preview and OCR that recognizes
-mathematical formulas from screen captures.
+A small cross-platform LaTeX editor with OCR.
 
 ![Platform: Windows / macOS / Linux](https://img.shields.io/badge/platform-windows%20%7C%20macos%20%7C%20linux-lightgrey)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
