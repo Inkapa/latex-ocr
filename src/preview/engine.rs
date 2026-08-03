@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 /// A failed LaTeX compilation, with an optional transcript tail for the user.
 #[derive(Debug)]
@@ -33,6 +35,29 @@ const MAX_LOG_LINES: usize = 40;
 
 impl TexEngine for TectonicCli {
     fn compile(&self, source: &str, out_dir: &Path) -> Result<Vec<PathBuf>, EngineError> {
+        self.compile_inner(source, out_dir, None)
+    }
+}
+
+impl TectonicCli {
+    /// Like [`TexEngine::compile`], but the engine process is killed once
+    /// `cancel` is set, so a stale render does not keep running behind newer
+    /// edits.
+    pub fn compile_cancellable(
+        &self,
+        source: &str,
+        out_dir: &Path,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<PathBuf>, EngineError> {
+        self.compile_inner(source, out_dir, Some(cancel))
+    }
+
+    fn compile_inner(
+        &self,
+        source: &str,
+        out_dir: &Path,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Vec<PathBuf>, EngineError> {
         if !self.binary.exists() {
             return Err(EngineError {
                 message: format!("tectonic not found at {}", self.binary.display()),
@@ -45,21 +70,64 @@ impl TexEngine for TectonicCli {
             message: format!("cannot write source file: {e}"),
             log: None,
         })?;
+        if cancelled(cancel) {
+            return Err(cancelled_error());
+        }
 
-        let output = Command::new(&self.binary)
+        // Output goes to files so a chatty engine can never fill a pipe while
+        // the cancel poll loop is not draining it.
+        let stdout = fs::File::create(out_dir.join("tectonic.out")).map_err(|e| EngineError {
+            message: format!("cannot create output file: {e}"),
+            log: None,
+        })?;
+        let stderr = fs::File::create(out_dir.join("tectonic.err")).map_err(|e| EngineError {
+            message: format!("cannot create output file: {e}"),
+            log: None,
+        })?;
+        let mut child = Command::new(&self.binary)
             .arg("--outdir")
             .arg(out_dir)
             .arg("--keep-logs")
             .arg(&tex_file)
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
             .current_dir(out_dir)
-            .output()
+            .spawn()
             .map_err(|e| EngineError {
                 message: format!("failed to run tectonic: {e}"),
                 log: None,
             })?;
 
-        let combined = combined_output(&output);
-        if !output.status.success() {
+        loop {
+            if cancelled(cancel) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(cancelled_error());
+            }
+            if child
+                .try_wait()
+                .map_err(|e| EngineError {
+                    message: format!("failed to run tectonic: {e}"),
+                    log: None,
+                })?
+                .is_some()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let status = child.wait().map_err(|e| EngineError {
+            message: format!("failed to run tectonic: {e}"),
+            log: None,
+        })?;
+
+        let combined = [out_dir.join("tectonic.out"), out_dir.join("tectonic.err")]
+            .iter()
+            .filter_map(|p| fs::read_to_string(p).ok())
+            .filter(|s| !s.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !status.success() {
             return Err(EngineError {
                 message: "LaTeX compilation failed".to_string(),
                 log: Some(extract_log(&combined, &out_dir.join("doc.log"))),
@@ -78,15 +146,15 @@ impl TexEngine for TectonicCli {
     }
 }
 
-fn combined_output(output: &std::process::Output) -> String {
-    let mut parts = Vec::new();
-    if !output.stdout.is_empty() {
-        parts.push(String::from_utf8_lossy(&output.stdout).into_owned());
+fn cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|c| c.load(Ordering::Relaxed))
+}
+
+fn cancelled_error() -> EngineError {
+    EngineError {
+        message: "render cancelled".to_string(),
+        log: None,
     }
-    if !output.stderr.is_empty() {
-        parts.push(String::from_utf8_lossy(&output.stderr).into_owned());
-    }
-    parts.join("\n")
 }
 
 /// Picks the most useful log text: the on-disk transcript when present,

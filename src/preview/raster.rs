@@ -177,11 +177,13 @@ fn resolve_rasterizer(engine_dir: &Path) -> Result<std::sync::Arc<dyn Rasterizer
 
 /// Compiles `source` to a PDF and rasterizes every page. Runs entirely on the
 /// calling thread; used from background render workers. Returns the page
-/// images and the raw PDF so the rendered output can be saved to disk.
+/// images and the raw PDF so the rendered output can be saved to disk. When
+/// `cancel` is set, the engine process is killed and the render aborts.
 pub fn render_source(
     setup: &RenderSetup,
     source: &str,
     tectonic_override: Option<&str>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<(Vec<RgbaImage>, Vec<u8>), String> {
     let bundle = setup.get(tectonic_override)?;
     let wrapped = crate::preview::tex::wrap_source(source);
@@ -190,7 +192,12 @@ pub fn render_source(
     let engine = crate::preview::engine::TectonicCli {
         binary: bundle.tectonic.clone(),
     };
-    let pdfs = engine.compile(&wrapped, tmp.path()).map_err(|e| {
+    let pdfs = if let Some(cancel) = cancel {
+        engine.compile_cancellable(&wrapped, tmp.path(), cancel)
+    } else {
+        engine.compile(&wrapped, tmp.path())
+    }
+    .map_err(|e| {
         let log = e.log.unwrap_or_default();
         if log.trim().is_empty() {
             e.message
@@ -198,6 +205,9 @@ pub fn render_source(
             format!("{}\n\n{}", e.message, log.trim_end())
         }
     })?;
+    if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+        return Err("render cancelled".to_string());
+    }
     let pdf = &pdfs[0];
     let pdf_bytes = fs::read(pdf).map_err(|e| format!("cannot read compiled PDF: {e}"))?;
     let pages: Vec<RgbaImage> = bundle

@@ -7,6 +7,7 @@ pub mod tex;
 pub use raster::RenderSetup;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,7 @@ use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 enum PreviewMsg {
     Rendered {
         generation_id: u64,
+        source: String,
         result: Result<(Vec<RgbaImage>, Vec<u8>), String>,
     },
 }
@@ -48,6 +50,8 @@ pub struct Preview {
     tectonic_override: Option<String>,
     generation: u64,
     in_flight: bool,
+    in_flight_cancel: Option<Arc<AtomicBool>>,
+    last_rendered_source: Option<String>,
     dirty: bool,
     last_edit: Option<Instant>,
     tx: Sender<PreviewMsg>,
@@ -67,6 +71,8 @@ impl Preview {
             tectonic_override: None,
             generation: 0,
             in_flight: false,
+            in_flight_cancel: None,
+            last_rendered_source: None,
             dirty: false,
             last_edit: None,
             tx,
@@ -113,19 +119,22 @@ impl Preview {
             match msg {
                 PreviewMsg::Rendered {
                     generation_id,
+                    source,
                     result: r,
                 } => {
                     if generation_id == self.generation {
-                        result = Some(r);
+                        result = Some((source, r));
                     }
                 }
             }
         }
 
-        if let Some(result) = result {
+        if let Some((source, result)) = result {
             self.in_flight = false;
+            self.in_flight_cancel = None;
             match result {
                 Ok((images, pdf)) => {
+                    self.last_rendered_source = Some(source);
                     let textures = images
                         .iter()
                         .filter_map(|img| {
@@ -153,9 +162,11 @@ impl Preview {
         }
     }
 
-    /// Kicks off a render when the debounce window has elapsed.
+    /// Kicks off a render when the debounce window has elapsed. A render that
+    /// is already running gets cancelled when newer edits are waiting, so the
+    /// preview never queues behind a stale compile.
     pub fn maybe_render(&mut self, source: &str, debounce: Duration) {
-        if !self.enabled || !self.dirty || self.in_flight {
+        if !self.enabled || !self.dirty {
             return;
         }
         // An empty document has nothing to show.
@@ -169,12 +180,25 @@ impl Preview {
             .map(|t| t.elapsed() >= debounce)
             .unwrap_or(true);
         if !due {
+            // Still typing: drop any stale render instead of letting it run
+            // to completion.
+            self.cancel_in_flight();
+            return;
+        }
+        // The document is identical to the preview on screen; nothing to do.
+        if matches!(self.state, PreviewState::Rendered(_))
+            && self.last_rendered_source.as_deref() == Some(source)
+        {
+            self.dirty = false;
             return;
         }
 
+        self.cancel_in_flight();
         self.dirty = false;
         self.generation += 1;
         self.in_flight = true;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.in_flight_cancel = Some(cancel.clone());
         self.state = PreviewState::Rendering;
 
         let generation_id = self.generation;
@@ -185,13 +209,21 @@ impl Preview {
         std::thread::Builder::new()
             .name("preview-render".to_string())
             .spawn(move || {
-                let result = raster::render_source(&setup, &source, override_path.as_deref());
+                let result =
+                    raster::render_source(&setup, &source, override_path.as_deref(), Some(&cancel));
                 let _ = tx.send(PreviewMsg::Rendered {
                     generation_id,
+                    source,
                     result,
                 });
             })
             .expect("spawn preview render thread");
+    }
+
+    fn cancel_in_flight(&mut self) {
+        if let Some(cancel) = self.in_flight_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
