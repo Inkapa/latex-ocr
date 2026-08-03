@@ -91,6 +91,7 @@ impl LatexOcrApp {
 
         let settings = SettingsStore::load();
         let setup = Arc::new(RenderSetup::new());
+        let zoom = settings.get().preview_zoom;
         let ocr_url = settings.get().ocr_url.clone();
         let ocr = Self::build_ocr(settings.get());
 
@@ -120,6 +121,7 @@ impl LatexOcrApp {
             ocr_test_result: None,
             prepare_started: None,
         };
+        app.preview.zoom = zoom;
         app.sync_edits_from_settings();
         app.prewarm_engine();
         app.preview.request_render();
@@ -363,7 +365,13 @@ impl LatexOcrApp {
                 dialog.busy = false;
                 dialog.error = Some(e.message);
             }
-            Err(_) => {}
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                // The worker died without sending; do not leave the dialog
+                // stuck on its spinner.
+                dialog.busy = false;
+                dialog.error = Some("OCR worker stopped unexpectedly".to_string());
+            }
         }
     }
 
@@ -1058,19 +1066,12 @@ impl LatexOcrApp {
     /// Document text up to the cursor, used to detect the surrounding math
     /// context before inserting an OCR result.
     fn text_before_cursor(&self) -> String {
-        let cursor = self
+        let at = self
             .editor
             .selected_char_range()
             .map(|r| r.start)
             .unwrap_or(0);
-        let byte = self
-            .editor
-            .text
-            .char_indices()
-            .nth(cursor)
-            .map(|(i, _)| i)
-            .unwrap_or(self.editor.text.len());
-        self.editor.text[..byte].to_string()
+        editor::text_before(&self.editor.text, at)
     }
 }
 
