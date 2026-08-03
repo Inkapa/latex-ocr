@@ -1,7 +1,7 @@
 # LaTeX OCR
 
-A desktop LaTeX editor with a live preview and a screen-snipping tool that
-turns math on the screen back into LaTeX source.
+A desktop LaTeX editor with a live preview and OCR that recognizes
+mathematical formulas from screen captures.
 
 ![Platform: Windows / macOS / Linux](https://img.shields.io/badge/platform-windows%20%7C%20macos%20%7C%20linux-lightgrey)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
@@ -14,8 +14,8 @@ turns math on the screen back into LaTeX source.
   (commands, comments, math mode) and Tab indentation.
 - **Math snippets.** Menus for fractions, roots, sums, integrals, environments,
   text styles and Greek letters. Selections are wrapped in place.
-- **Screen-snip OCR.** Freeze the screen, drag a rectangle over any math, and
-  the recognized LaTeX is returned for review or insertion.
+- **Screen-snip OCR.** Freeze the screen, select a formula, and OCR returns
+  the corresponding LaTeX for review or insertion.
 - **Two OCR backends.** An on-device ONNX engine (default) and an optional
   pix2tex-compatible HTTP server.
 - **Export.** Save the rendered output as a PNG, JPEG or PDF from the preview.
@@ -68,7 +68,7 @@ section below).
 - Type LaTeX on the left; the preview updates automatically. Use **Auto** to
   toggle live re-rendering or **Render now** to force it.
 - Add math with the **Insert** menu, or select text and wrap it with a tool.
-- Click **Snip & OCR**, drag a rectangle over any math, and review the result
+- Click **Snip & OCR**, drag a rectangle over a formula, and review the result
   in the OCR window. Insert it at the cursor or copy it.
 - Use **Save…** in the preview toolbar to export the rendered output as PNG,
   JPEG or PDF.
@@ -77,15 +77,16 @@ section below).
 
 ## OCR
 
-OCR runs on-device by default through ONNX Runtime. An HTTP server that speaks
-the pix2tex protocol can be used instead.
+OCR supports two backends. The default runs on-device through ONNX Runtime; a
+pix2tex-compatible HTTP server can be used instead. Other model families are
+not currently supported.
 
 ### On-device (ONNX)
 
-The app runs three ONNX graphs exported from the pix2tex checkpoints: a
-resolution predictor, the vision encoder and the transformer decoder. ONNX
-Runtime is provisioned automatically on first use, mirroring how the LaTeX
-engine and PDF renderer are fetched.
+The default backend runs the pix2tex model (LaTeX-OCR by Lukas Blecher, MIT
+licensed) as three ONNX graphs: a resolution predictor, a vision transformer
+encoder and a transformer decoder. ONNX Runtime is provisioned automatically
+on first use, mirroring how the LaTeX engine and PDF renderer are fetched.
 
 The model graphs are produced once by the export script:
 
@@ -157,13 +158,33 @@ TECTONIC_OVERRIDE=/path/to/tectonic cargo test --test render_manual -- --ignored
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+The project is MIT licensed. See [LICENSE](LICENSE).
+
+## Acknowledgements
+
+The project relies on permissively licensed components so they can be
+distributed alongside the MIT-licensed app:
+
+- **pix2tex (LaTeX-OCR)** by Lukas Blecher, MIT. The OCR model architecture,
+  checkpoints and tokenizer used by the on-device backend.
+  <https://github.com/lukas-blecher/LaTeX-OCR>
+- **x-transformers** by Phil Wang, MIT. The transformer layers of the OCR
+  model. <https://github.com/lucidrains/x-transformers>
+- **Tectonic**, MIT. The LaTeX engine used to compile previews.
+- **pdfium** (Chromium), BSD-3-Clause. The PDF renderer used to rasterize
+  previews.
+- **ONNX Runtime** by Microsoft, MIT. Local model inference.
+- **DejaVu fonts**, Bitstream Vera license. The bundled UI fonts.
+
+The Tectonic and pdfium binaries, the ONNX Runtime library and the OCR model
+weights are not part of this repository; they are downloaded or exported as
+described in the Building and OCR sections.
+
+Other math-OCR systems exist (for example Texify, whose model weights are
+GPL-3.0) but are not bundled here, because they cannot be redistributed under
+this project's MIT license.
 
 ## Credits
 
 Created by Liam CORNU. The source lives at
 [https://github.com/Inkapa/latex-ocr](https://github.com/Inkapa/latex-ocr).
-
-Rendering is powered by [Tectonic](https://tectonic-typesetting.github.io/)
-and [pdfium](https://pdfium.googlesource.com/). The OCR backend is based on
-[pix2tex](https://github.com/lukas-blecher/LaTeX-OCR), which is MIT licensed.
