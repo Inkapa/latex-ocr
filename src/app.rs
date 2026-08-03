@@ -43,7 +43,6 @@ impl DiscardAction {
 enum SnipState {
     Idle,
     Overlay(Arc<Mutex<snip::OverlayState>>),
-    Capturing(mpsc::Receiver<Result<RgbaImage, String>>),
 }
 
 struct OcrDialog {
@@ -203,23 +202,41 @@ impl LatexOcrApp {
 
     fn handle_snip(&mut self, ctx: &egui::Context) {
         match &self.snip {
-            SnipState::Overlay(state) => {
-                let mut state = state.lock().unwrap();
+            SnipState::Overlay(overlay) => {
+                let mut guard = overlay.lock().unwrap();
                 // Safety net: if the overlay window went away without an
                 // outcome (closed by the OS), cancel so the app never stays
                 // stuck in a snip.
-                if state.rendered_once
-                    && state.outcome.is_none()
-                    && !ctx.input(|i| i.raw.viewports.contains_key(&state.viewport_id))
+                if guard.rendered_once
+                    && guard.outcome.is_none()
+                    && !ctx.input(|i| i.raw.viewports.contains_key(&guard.viewport_id))
                 {
-                    state.outcome = Some(snip::OverlayOutcome::Cancelled);
+                    guard.outcome = Some(snip::OverlayOutcome::Cancelled);
                 }
-                let outcome = state.outcome;
-                drop(state);
+                let outcome = guard.outcome;
+                drop(guard);
 
                 match outcome {
                     Some(snip::OverlayOutcome::Captured(region)) => {
-                        self.start_capture(region);
+                        // The selected region is cropped from the frozen
+                        // desktop snapshot captured when the snip started, so
+                        // the overlay never appears in the result.
+                        let image = {
+                            let guard = overlay.lock().unwrap();
+                            match guard.background_image() {
+                                Some((image, origin_x, origin_y)) => {
+                                    crop_region(image, region, origin_x, origin_y)
+                                }
+                                None => snapshot::capture_region(region),
+                            }
+                        };
+                        self.snip = SnipState::Idle;
+                        match image {
+                            Ok(image) => self.open_ocr_dialog(ctx, image),
+                            Err(message) => {
+                                self.set_status(format!("Screen capture failed: {message}"));
+                            }
+                        }
                     }
                     Some(snip::OverlayOutcome::Cancelled) => {
                         self.snip = SnipState::Idle;
@@ -229,30 +246,6 @@ impl LatexOcrApp {
                         // The overlay only lives while we keep showing it, so
                         // keep waking the root until the selection finishes.
                         ctx.request_repaint_after(Duration::from_millis(16));
-                    }
-                }
-            }
-            SnipState::Capturing(rx) => {
-                // Poll for a finished background capture, treating a dead
-                // capture thread (it panicked without sending) as a failure so
-                // the app does not stay stuck in the "Capturing" state.
-                let ready = match rx.try_recv() {
-                    Ok(result) => Some(result),
-                    Err(mpsc::TryRecvError::Empty) => None,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        Some(Err("screen capture aborted".to_string()))
-                    }
-                };
-                if let Some(result) = ready {
-                    match result {
-                        Ok(image) => {
-                            self.snip = SnipState::Idle;
-                            self.open_ocr_dialog(ctx, image);
-                        }
-                        Err(message) => {
-                            self.snip = SnipState::Idle;
-                            self.set_status(format!("Screen capture failed: {message}"));
-                        }
                     }
                 }
             }
@@ -275,20 +268,6 @@ impl LatexOcrApp {
                 }
             }
         }
-    }
-
-    /// Captures the selected region off the UI thread and polls for the result.
-    fn start_capture(&mut self, region: snapshot::Region) {
-        let (tx, rx) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("snip-capture".into())
-            .spawn(move || {
-                let result = snapshot::capture_region(region);
-                let _ = tx.send(result);
-            })
-            .expect("spawn snip capture thread");
-        self.snip = SnipState::Capturing(rx);
-        self.set_status("Capturing screen…");
     }
 
     fn open_ocr_dialog(&mut self, ctx: &egui::Context, image: RgbaImage) {
@@ -565,7 +544,14 @@ impl LatexOcrApp {
                 return;
             }
         };
-        let state = snip::OverlayState::begin(monitor);
+        let desktop = match snapshot::capture_virtual_desktop() {
+            Ok(desktop) => Some(desktop),
+            Err(message) => {
+                self.set_status(format!("Screen capture unavailable: {message}"));
+                return;
+            }
+        };
+        let state = snip::OverlayState::begin(monitor, desktop);
         self.snip = SnipState::Overlay(state);
         self.set_status("Drag over the math to select it.  Esc to cancel.");
     }
@@ -933,6 +919,27 @@ impl LatexOcrApp {
             .unwrap_or(self.editor.text.len());
         self.editor.text[..byte].to_string()
     }
+}
+
+/// Crops `region` (global physical pixels) out of the desktop snapshot, which
+/// is offset from global coordinates by its origin.
+fn crop_region(
+    image: &RgbaImage,
+    region: snapshot::Region,
+    origin_x: i32,
+    origin_y: i32,
+) -> Result<RgbaImage, String> {
+    let x = (region.x - origin_x).max(0);
+    let y = (region.y - origin_y).max(0);
+    let width = (region.width as i32).min(image.width() as i32 - x);
+    let height = (region.height as i32).min(image.height() as i32 - y);
+    if width <= 0 || height <= 0 {
+        return Err("capture region is outside the desktop snapshot".to_string());
+    }
+    Ok(
+        image::imageops::crop_imm(image, x as u32, y as u32, width as u32, height as u32)
+            .to_image(),
+    )
 }
 
 /// Renders the OCR result ready for insertion: wrapped in inline or display

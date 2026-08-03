@@ -10,11 +10,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use eframe::egui::{
-    self, Color32, CursorIcon, Key, Pos2, Rect, Stroke, StrokeKind, Vec2, ViewportBuilder,
-    ViewportCommand, ViewportId, pos2, vec2,
+    self, Color32, ColorImage, CursorIcon, Key, Pos2, Rect, Stroke, StrokeKind, TextureOptions,
+    Vec2, ViewportBuilder, ViewportCommand, ViewportId, pos2, vec2,
 };
+use image::RgbaImage;
 
-use crate::snapshot::{self, MonitorInfo, Region};
+use crate::snapshot::{self, MonitorInfo, Region, VirtualDesktop};
 use crate::theme::ACCENT;
 
 /// How the user finished the selection.
@@ -33,6 +34,9 @@ pub struct OverlayState {
     pub viewport_id: ViewportId,
     /// The monitor the overlay currently covers.
     monitor: MonitorInfo,
+    /// Frozen desktop snapshot used as the overlay background and as the
+    /// source of the captured region.
+    background: Option<Background>,
     /// Set once the user finishes the selection.
     pub outcome: Option<OverlayOutcome>,
     /// Button state from the previous frame, used to detect press/release edges.
@@ -51,6 +55,24 @@ pub struct OverlayState {
     tick_count: u64,
 }
 
+/// A frozen desktop capture plus its GPU texture.
+struct Background {
+    image: RgbaImage,
+    origin_x: i32,
+    origin_y: i32,
+    texture: Option<egui::TextureHandle>,
+}
+
+/// The parts of a background needed for drawing, without the pixel data.
+#[derive(Clone)]
+struct BackgroundTexture {
+    texture: egui::TextureHandle,
+    origin_x: i32,
+    origin_y: i32,
+    image_w: u32,
+    image_h: u32,
+}
+
 /// How many points of deviation is tolerated before the overlay is treated as
 /// misplaced. Also the threshold past which a stale geometry is drawn anyway.
 const GEOMETRY_TOLERANCE: f32 = 2.0;
@@ -63,8 +85,11 @@ const UNSETTLED_DRAW_FALLBACK: u32 = 90;
 const MIN_SELECTION: u32 = 8;
 
 impl OverlayState {
-    /// Starts a snip on the given monitor and returns the shared state.
-    pub fn begin(monitor: MonitorInfo) -> Arc<Mutex<Self>> {
+    /// Starts a snip on the given monitor and returns the shared state. The
+    /// background is a frozen desktop capture that the overlay paints behind
+    /// the dim, so the window is always fully covered even on monitors where
+    /// window transparency is not composited correctly.
+    pub fn begin(monitor: MonitorInfo, desktop: Option<VirtualDesktop>) -> Arc<Mutex<Self>> {
         log::debug!(
             "snip begin: monitor x={} y={} {}x{} scale={}",
             monitor.x,
@@ -73,9 +98,16 @@ impl OverlayState {
             monitor.height,
             monitor.scale
         );
+        let background = desktop.map(|d| Background {
+            image: d.image,
+            origin_x: d.origin_x,
+            origin_y: d.origin_y,
+            texture: None,
+        });
         Arc::new(Mutex::new(Self {
             viewport_id: fresh_viewport_id(),
             monitor,
+            background,
             outcome: None,
             // The "Snip & OCR" button is still held when we get here, so the
             // first press must not start a selection.
@@ -92,6 +124,14 @@ impl OverlayState {
     /// The monitor this overlay currently covers.
     pub fn monitor(&self) -> MonitorInfo {
         self.monitor
+    }
+
+    /// The frozen desktop snapshot and the virtual-desktop origin that maps it
+    /// back to global physical pixels, if any.
+    pub fn background_image(&self) -> Option<(&RgbaImage, i32, i32)> {
+        self.background
+            .as_ref()
+            .map(|bg| (&bg.image, bg.origin_x, bg.origin_y))
     }
 }
 
@@ -123,17 +163,39 @@ fn viewport_builder(monitor: MonitorInfo) -> ViewportBuilder {
 
 /// Shows the overlay viewport. Call once per frame while the snip is active.
 pub fn show_viewport(ctx: &egui::Context, state: &Arc<Mutex<OverlayState>>) {
-    let (viewport_id, builder) = {
-        let state = state.lock().unwrap();
-        (state.viewport_id, viewport_builder(state.monitor))
+    let (viewport_id, builder, background) = {
+        let mut state = state.lock().unwrap();
+        if let Some(bg) = &mut state.background
+            && bg.texture.is_none()
+        {
+            let size = [bg.image.width() as usize, bg.image.height() as usize];
+            let color = ColorImage::from_rgba_unmultiplied(size, bg.image.as_raw());
+            bg.texture = Some(ctx.load_texture("snip-background", color, TextureOptions::LINEAR));
+        }
+        let background = state.background.as_ref().map(|bg| BackgroundTexture {
+            texture: bg.texture.clone().unwrap(),
+            origin_x: bg.origin_x,
+            origin_y: bg.origin_y,
+            image_w: bg.image.width(),
+            image_h: bg.image.height(),
+        });
+        (
+            state.viewport_id,
+            viewport_builder(state.monitor),
+            background,
+        )
     };
     let state = Arc::clone(state);
     ctx.show_viewport_deferred(viewport_id, builder, move |ui, _class| {
-        tick(ui, &state);
+        tick(ui, &state, background.clone());
     });
 }
 
-fn tick(ui: &mut egui::Ui, state: &Arc<Mutex<OverlayState>>) {
+fn tick(
+    ui: &mut egui::Ui,
+    state: &Arc<Mutex<OverlayState>>,
+    background: Option<BackgroundTexture>,
+) {
     let ctx = ui.ctx().clone();
 
     let mut s = state.lock().unwrap();
@@ -220,6 +282,7 @@ fn tick(ui: &mut egui::Ui, state: &Arc<Mutex<OverlayState>>) {
     draw(
         ui,
         &monitor,
+        background.as_ref(),
         dragging,
         start,
         current,
@@ -386,6 +449,7 @@ fn selection_region(
 fn draw(
     ui: &mut egui::Ui,
     monitor: &MonitorInfo,
+    background: Option<&BackgroundTexture>,
     dragging: bool,
     start: Option<(i32, i32)>,
     current: Option<(i32, i32)>,
@@ -394,16 +458,24 @@ fn draw(
     let ctx = ui.ctx();
     ctx.set_cursor_icon(CursorIcon::Crosshair);
 
-    // While the window is still moving onto the monitor under the cursor it is
-    // left fully transparent, so a wrongly sized or placed frame never flashes
-    // on screen.
+    let screen = ui.max_rect();
+    let painter = ui.painter();
+
+    // Paint the frozen desktop first so the window is fully covered and can
+    // never show white, even on monitors where window transparency is not
+    // composited correctly.
+    if let Some(bg) = background {
+        let uv = background_uv(monitor, bg);
+        painter.image(bg.texture.id(), screen, uv, Color32::WHITE);
+    }
+
+    // While the window is still moving onto the monitor under the cursor the
+    // dim is skipped, so a wrongly sized or placed frame never flashes on screen.
     if !visible {
         return;
     }
 
-    let screen = ui.max_rect();
     let dim = Color32::from_black_alpha(60);
-    let painter = ui.painter();
 
     let selection = match (dragging, start, current) {
         (true, Some((sx, sy)), Some((cx, cy))) => {
@@ -434,6 +506,17 @@ fn draw(
             painter.rect_filled(screen, 0.0, dim);
         }
     }
+}
+
+/// The UV rect that selects `monitor`'s region from the desktop snapshot.
+fn background_uv(monitor: &MonitorInfo, background: &BackgroundTexture) -> Rect {
+    let u0 = (monitor.x - background.origin_x) as f32 / background.image_w as f32;
+    let v0 = (monitor.y - background.origin_y) as f32 / background.image_h as f32;
+    let u1 =
+        (monitor.x + monitor.width as i32 - background.origin_x) as f32 / background.image_w as f32;
+    let v1 = (monitor.y + monitor.height as i32 - background.origin_y) as f32
+        / background.image_h as f32;
+    Rect::from_min_max(pos2(u0, v0), pos2(u1, v1))
 }
 
 /// Draws a small readout of the selection size just outside its corner.
